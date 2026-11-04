@@ -275,3 +275,10 @@ export const AspectLock = (p: P) => (
     <path d="M7 9.5h6M7 9.5l1.5-1.5M7 9.5 8.5 11M13 9.5 11.5 8M13 9.5 11.5 11" />
   </Svg>
 )
+
+export const Lock = (p: P) => (
+  <Svg {...p}>
+    <rect x="4" y="9" width="12" height="8.5" rx="2" />
+    <path d="M6.8 9V6.5a3.2 3.2 0 0 1 6.4 0V9M10 12.3v2" />
+  </Svg>
+)

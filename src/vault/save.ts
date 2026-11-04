@@ -10,6 +10,8 @@ import { classify, backoffMs, sleep } from '../import/retry.ts'
 import { DeviceDetachedError } from '../device/types.ts'
 import { folderNameFor, type OpenVault } from './vault.ts'
 import type { ItemKind } from '../gallery/types.ts'
+import { SaveProgressTracker, type SaveFileProgress, type SaveProgress } from './save-progress.ts'
+export type { SaveProgress } from './save-progress.ts'
 
 /**
  * Save a selection into a vault: from a phone, or from another vault.
@@ -36,6 +38,9 @@ export interface SaveFile {
   size: number | null
   /** Known checksum, when the source is a vault. Lets duplicates skip without copying. */
   sha256: string | null
+  /** Phone identity captured before the copy, used only by verified cleanup. */
+  sourcePath?: string
+  sourceMtimeMs?: number
   read(): AsyncIterable<Buffer>
 }
 
@@ -67,13 +72,6 @@ export interface SaveAlbum {
   keys: string[]
 }
 
-export interface SaveProgress {
-  itemsDone: number
-  itemsTotal: number
-  bytesDone: number
-  current: string | null
-}
-
 export interface SaveResult {
   saved: number
   alreadyThere: number
@@ -82,6 +80,12 @@ export interface SaveResult {
   bytes: number
   /** Asset ids created in the vault, for thumbnails. */
   newAssets: number[]
+  /**
+   * Which vault asset each saved item is now, by item key: new, or already
+   * there. Items that failed or were skipped are absent. Used to check each
+   * one before deleting it from the phone.
+   */
+  assets: Record<string, number>
 }
 
 export interface SaveOptions {
@@ -108,44 +112,47 @@ export async function saveToVault(
 ): Promise<SaveResult> {
   const { db, layout } = vault
   const now = opts.now ?? Date.now
-  const result: SaveResult = { saved: 0, alreadyThere: 0, skippedCloud: 0, failed: [], bytes: 0, newAssets: [] }
+  const result: SaveResult = { saved: 0, alreadyThere: 0, skippedCloud: 0, failed: [], bytes: 0, newAssets: [], assets: {} }
   const keys = new Set(items.map((i) => i.key))
   const relevantAlbums = albums.filter((a) => a.keys.some((k) => keys.has(k)))
   const albumIds = new Map(relevantAlbums.map((a) => [a.uuid, ensureAlbum(db, layout.root, a, now())]))
-  const progress: SaveProgress = { itemsDone: 0, itemsTotal: items.length, bytesDone: 0, current: null }
+  const progress = new SaveProgressTracker(items.map(item => ({ files: item.files,
+    skip: item.cloud || findExisting(db, item) !== null })), now, opts.onProgress)
 
-  for (const item of items) {
+  try {
+  for (const [index, item] of items.entries()) {
     if (opts.signal?.aborted) throw new SaveCancelled()
-    progress.current = item.files[0]?.name ?? item.key
-    opts.onProgress?.({ ...progress })
+    progress.startItem(index, item.key)
 
     if (item.cloud) {
+      progress.skipItem(index)
       result.skippedCloud++
     } else {
       const existing = findExisting(db, item)
       if (existing !== null) {
+        progress.skipItem(index)
         result.alreadyThere++
+        result.assets[item.key] = existing
         // Already here, but maybe not in this album yet.
         linkAlbums(db, layout.media, existing, item.key, relevantAlbums, albumIds)
       } else {
-        const outcome = await saveItem(vault, item, relevantAlbums, albumIds, opts, (n) => {
-          progress.bytesDone += n
-          opts.onProgress?.({ ...progress })
-        })
+        const outcome = await saveItem(vault, item, relevantAlbums, albumIds, opts,
+          fileIndex => progress.file(index, fileIndex), () => progress.finishing())
         if (outcome.assetId !== null) {
           result.saved++
           result.bytes += outcome.bytes
           result.newAssets.push(outcome.assetId)
+          // Only an item with every file saved counts as saved for clean-up.
+          if (!outcome.failed.length) result.assets[item.key] = outcome.assetId
         }
         result.failed.push(...outcome.failed)
       }
     }
-    progress.itemsDone++
-    opts.onProgress?.({ ...progress })
+    progress.itemDone()
   }
-  progress.current = null
-  opts.onProgress?.({ ...progress })
+  progress.complete()
   return result
+  } finally { progress.close() }
 }
 
 /* ----------------------------------------------------------------- items */
@@ -184,7 +191,8 @@ async function saveItem(
   albums: SaveAlbum[],
   albumIds: Map<string, { id: number; folder: string }>,
   opts: SaveOptions,
-  onBytes: (n: number) => void,
+  fileProgress: (index: number) => SaveFileProgress,
+  finishing: () => void,
 ): Promise<{ assetId: number | null; bytes: number; failed: SaveResult['failed'] }> {
   const { db, layout } = vault
   const now = opts.now ?? Date.now
@@ -196,17 +204,22 @@ async function saveItem(
   const staged: { file: SaveFile; tmp: string; sha: string; bytes: number }[] = []
   const failed: SaveResult['failed'] = []
 
-  for (const file of item.files) {
+  for (const [index, file] of item.files.entries()) {
+    const progress = fileProgress(index)
     try {
-      staged.push({ file, ...(await fetchVerified(file, path.join(dir, `.${file.name}.partial`), opts, onBytes)) })
+      staged.push({ file, ...(await fetchVerified(file, path.join(dir, `.${file.name}.partial`), opts, progress)) })
     } catch (e) {
       if (e instanceof SaveCancelled || e instanceof DeviceDetachedError) {
         for (const s of staged) fs.rmSync(s.tmp, { force: true })
         throw e
       }
+      progress.failed()
       failed.push({ item: item.key, file: file.name, reason: (e as Error).message })
     }
   }
+  finishing()
+  // Publish the phase before metadata and the final database transaction.
+  await new Promise<void>(resolve => setImmediate(resolve))
 
   const master = staged.find((s) => s.file.role === 'master') ?? staged[0]
   if (!master || !staged.some((s) => s.file.role === 'master')) {
@@ -380,12 +393,13 @@ async function fetchVerified(
   file: SaveFile,
   tmp: string,
   opts: SaveOptions,
-  onBytes: (n: number) => void,
+  progress: SaveFileProgress,
 ): Promise<{ tmp: string; sha: string; bytes: number }> {
   const maxAttempts = opts.maxAttempts ?? 3
   for (let attempt = 1; ; attempt++) {
     try {
-      return await fetchOnce(file, tmp, opts, onBytes)
+      progress.beginAttempt()
+      return await fetchOnce(file, tmp, opts, progress)
     } catch (e) {
       fs.rmSync(tmp, { force: true })
       if (e instanceof SaveCancelled || e instanceof DeviceDetachedError) throw e
@@ -400,7 +414,7 @@ async function fetchOnce(
   file: SaveFile,
   tmp: string,
   opts: SaveOptions,
-  onBytes: (n: number) => void,
+  progress: SaveFileProgress,
 ): Promise<{ tmp: string; sha: string; bytes: number }> {
   const hash = createHash('sha256')
   const fd = fs.openSync(tmp, 'w')
@@ -411,7 +425,7 @@ async function fetchOnce(
       fs.writeSync(fd, chunk)
       hash.update(chunk)
       bytes += chunk.length
-      onBytes(chunk.length)
+      progress.copied(chunk.length)
     }
     fs.fsyncSync(fd)
   } finally {
@@ -424,7 +438,8 @@ async function fetchOnce(
 
   // Read it back, in chunks: a phone video can be several gigabytes. The disk
   // has to have kept what it was given.
-  if (hashFile(tmp) !== sha) throw new Error('bytes on disk differ from bytes received')
+  progress.verifying()
+  if (await hashFile(tmp, n => progress.checked(n), opts.signal) !== sha) throw new Error('bytes on disk differ from bytes received')
 
   if (file.role !== 'sidecar') {
     const access = FileAccess.open(tmp)
@@ -438,19 +453,12 @@ async function fetchOnce(
   return { tmp, sha, bytes }
 }
 
-function hashFile(file: string): string {
+async function hashFile(file: string, onBytes: (n: number) => void, signal?: AbortSignal): Promise<string> {
   const hash = createHash('sha256')
-  const fd = fs.openSync(file, 'r')
-  try {
-    const buf = Buffer.alloc(4 * 1024 * 1024)
-    for (let pos = 0; ; ) {
-      const n = fs.readSync(fd, buf, 0, buf.length, pos)
-      if (n === 0) break
-      hash.update(buf.subarray(0, n))
-      pos += n
-    }
-  } finally {
-    fs.closeSync(fd)
+  for await (const chunk of fs.createReadStream(file, { highWaterMark: 4 * 1024 * 1024 })) {
+    if (signal?.aborted) throw new SaveCancelled()
+    hash.update(chunk)
+    onBytes(chunk.length)
   }
   return hash.digest('hex')
 }

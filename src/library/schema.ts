@@ -315,4 +315,10 @@ export const MIGRATIONS: string[] = [
     created_at INTEGER NOT NULL
   );
   `,
+  /* --------------------------------------------------------------- v12 */ `
+  -- Hidden and Recently Deleted items are encrypted (src/vault/private.ts).
+  -- The file's own path stays, so it can go back exactly where it was;
+  -- encrypted_path names its encrypted copy in the vault's private folder.
+  ALTER TABLE file ADD COLUMN encrypted_path TEXT;
+  `,
 ]

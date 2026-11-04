@@ -22,3 +22,9 @@ FFmpeg 9.0.2:
 The bundled resources/bin/provenance.json records the distribution URL and
 verified SHA-256 of the downloaded build. Source and license terms for linked
 libraries are available through the upstream build and FFmpeg source links.
+
+The Windows photo-cleanup helper includes the MIT-licensed MediaDevices 1.10.2
+library from https://github.com/Bassman2/MediaDevices. Its DLL, MIT license and
+pinned NuGet distribution details are in resources/app/dist-app/wpd. This
+helper uses Windows Portable Devices for identity, content reads and deletion;
+Theia does not unlink photo files over AFC or edit the iPhone Photos database.

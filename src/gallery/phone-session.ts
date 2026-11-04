@@ -178,6 +178,68 @@ export class PhoneSession {
    * (IMG_E1234 beside IMG_1234), otherwise the original. The phone's own
    * Photos app shows edits by default, and so does this.
    */
+  /**
+   * The phone's own Hidden album and Recently Deleted. Theia never writes these
+   * to its cache: thumbnails and full pictures are made in memory, and videos
+   * stream straight from the phone.
+   */
+  isPrivate(key: string): boolean {
+    this.privateKeys ??= new Set([...this.library.hidden, ...this.library.deleted])
+    return this.privateKeys.has(key)
+  }
+  private privateKeys: Set<string> | null = null
+
+  /** The phone's small preview of an item, in memory. */
+  async previewBytes(key: string): Promise<Buffer | null> {
+    const a = this.asset(key)
+    return a ? this.phonePreview(a) : null
+  }
+
+  /** The bytes the viewer shows (the edit if there is one), read straight into memory. */
+  async displayBytes(key: string): Promise<{ data: Buffer; name: string } | null> {
+    const a = this.asset(key)
+    if (!a || a.cloud) return null
+    const edited = a.edited
+      ? this.filesFor(key).find((p) => /^[A-Za-z]+_E\d+\.(heic|heif|jpe?g|png)$/i.test(path.posix.basename(p)))
+      : undefined
+    const devicePath = edited ?? a.path
+    try {
+      return { data: await this.readAll(devicePath), name: path.posix.basename(devicePath) }
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Remove anything already cached for the phone's private items (from before
+   * this rule, or from when they were still in the Library). Returns how many files went.
+   */
+  forgetPrivate(): number {
+    let n = 0
+    const rm = (p: string) => {
+      if (fs.existsSync(p)) {
+        fs.rmSync(p, { recursive: true, force: true })
+        n++
+      }
+    }
+    const walk = (dir: string, match: (name: string) => boolean) => {
+      if (!fs.existsSync(dir)) return
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, e.name)
+        if (e.isDirectory()) walk(p, match)
+        else if (match(e.name)) rm(p)
+      }
+    }
+    const keys = [...this.library.hidden, ...this.library.deleted]
+    const ids = new Set(keys.map((k) => safe(k)))
+    const names = new Set(keys.flatMap((k) => this.filesFor(k).map((p) => path.posix.basename(p))))
+    walk(path.join(this.dir, 'thumbs'), (name) => ids.has(name.replace(/-(sm|lg|ph)\.webp$/, '')))
+    walk(path.join(this.dir, 'rendered'), (name) => [...ids].some((id) => name.includes(id)))
+    walk(path.join(this.dir, 'originals'), (name) => names.has(name))
+    walk(path.join(this.dir, 'video'), (name) => [...ids].some((id) => name.startsWith(id)))
+    return n
+  }
+
   async display(key: string): Promise<{ path: string; name: string } | null> {
     const a = this.asset(key)
     if (!a || a.cloud) return null

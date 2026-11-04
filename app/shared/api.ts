@@ -38,6 +38,9 @@ export interface VaultInfo {
   kind: 'album' | 'library'
   /** Goes up on any change to the vault's contents, so the window reloads. */
   revision: number
+  /** Hidden and Recently Deleted: no passcode yet, locked, or open. */
+  protection: 'off' | 'locked' | 'unlocked'
+  protectionError?: string | null
 }
 
 export type SaveState =
@@ -48,6 +51,12 @@ export type SaveState =
       itemsDone: number
       itemsTotal: number
       bytesDone: number
+      /** Null until every remaining file's size is known. */
+      bytesTotal?: number | null
+      bytesPerSecond?: number
+      /** Time left for the copy and its read-back check. Null while estimating. */
+      etaMs?: number | null
+      phase?: 'copying' | 'verifying' | 'finishing' | 'checking-deletion' | 'deleting'
       current: string | null
     }
   | {
@@ -58,6 +67,7 @@ export type SaveState =
       skippedCloud: number
       failed: { item: string; file: string; reason: string }[]
       cancelled: boolean
+      cleanup?: { deleted: number; kept: number; reasons: { item: string; reason: string }[] }
     }
   | { status: 'error'; target: string; error: string }
 
@@ -86,10 +96,30 @@ export interface StoryboardInfo {
   height: number
 }
 
+export interface VaultDetails {
+  id: SourceId
+  name: string
+  /** The folder on disk. */
+  root: string
+  kind: 'album' | 'library'
+  count: number
+  /** Everything in the folder, the app's own cache included. */
+  bytes: number
+  /**
+   * Whether the whole folder fits in this drive's Recycle Bin. Windows deletes
+   * anything bigger for good, without asking, so Theia checks first. Null when
+   * the limit couldn't be read.
+   */
+  fitsRecycleBin: boolean | null
+  recycleBinMax: number | null
+}
+
 export type SaveTarget = { vault: SourceId } | { newVault: true }
 
 export interface SaveRequest {
   source: SourceId
+  /** Explicitly opted in for this save, after a deletion warning. iPhone only. */
+  deleteAfterSave?: boolean
   /** Save the selected burst frames as individual photos. */
   framesOnly?: boolean
   /** Items to save, by key. */
@@ -121,6 +151,24 @@ export interface PhotosApi {
   /** Folder picker: an empty folder becomes a new vault, a vault folder opens. */
   openVault(): Promise<SourceId | null>
   closeVault(id: SourceId): Promise<void>
+  vaultDetails(id: SourceId): Promise<VaultDetails>
+  /**
+   * Hidden and Recently Deleted are encrypted. Setting a passcode returns a
+   * recovery key, shown once: the only other way in.
+   */
+  setUpProtection(id: SourceId, passcode: string): Promise<string>
+  /** With the passcode or the recovery key. */
+  unlockVault(id: SourceId, secret: string): Promise<void>
+  lockVault(id: SourceId): Promise<void>
+  changeVaultPasscode(id: SourceId, current: string, next: string): Promise<void>
+  /** Open the vault's folder in File Explorer. */
+  revealVault(id: SourceId): Promise<void>
+  /**
+   * Delete a vault and everything in it. `confirmName` must be the vault's
+   * name, typed. 'recycle' refuses a vault too big for the Recycle Bin;
+   * 'permanent' is for exactly that case, chosen knowingly.
+   */
+  deleteVault(id: SourceId, confirmName: string, mode: 'recycle' | 'permanent'): Promise<void>
 
   save(request: SaveRequest): Promise<void>
   cancelSave(): Promise<void>
@@ -163,6 +211,13 @@ export const INVOKE_CHANNELS = [
   'storyboard',
   'openVault',
   'closeVault',
+  'vaultDetails',
+  'setUpProtection',
+  'unlockVault',
+  'lockVault',
+  'changeVaultPasscode',
+  'revealVault',
+  'deleteVault',
   'save',
   'cancelSave',
   'dismissSave',

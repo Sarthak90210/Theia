@@ -15,7 +15,8 @@ export interface DecodedImage {
 }
 
 interface Pending {
-  path: string
+  path?: string
+  data?: Buffer
   resolve: (img: DecodedImage) => void
   reject: (e: Error) => void
 }
@@ -43,6 +44,15 @@ export class HeicPool {
     if (this.closed) return Promise.reject(new Error('HEIC pool is closed'))
     return new Promise((resolve, reject) => {
       this.waiting.push({ path, resolve, reject })
+      this.pump()
+    })
+  }
+
+  /** Decode HEIC bytes already in memory: a protected photo, decrypted, never written out. */
+  decodeBuffer(data: Buffer): Promise<DecodedImage> {
+    if (this.closed) return Promise.reject(new Error('HEIC pool is closed'))
+    return new Promise((resolve, reject) => {
+      this.waiting.push({ data, resolve, reject })
       this.pump()
     })
   }
@@ -88,7 +98,11 @@ export class HeicPool {
       const job = this.waiting.shift()
       if (!job) return
       slot.busy = job
-      slot.worker.postMessage({ id: this.nextId++, path: job.path })
+      if (job.data) {
+        // Copy into a transferable buffer; the caller keeps its own.
+        const copy = new Uint8Array(job.data).buffer
+        slot.worker.postMessage({ id: this.nextId++, data: copy }, [copy])
+      } else slot.worker.postMessage({ id: this.nextId++, path: job.path })
     }
   }
 }

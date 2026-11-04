@@ -258,11 +258,11 @@ export function vaultDetail(db: Db, mediaRoot: string, key: string): ItemDetail 
 export function vaultFiles(
   db: Db,
   key: string,
-): { id: number; path: string; role: string; mime: string; sha256: string; bytes: number; primary: boolean }[] {
+): { id: number; path: string; role: string; mime: string; sha256: string; bytes: number; primary: boolean; encryptedPath: string | null }[] {
   return (
     db
       .prepare(
-        `SELECT id, path, role, mime, sha256, bytes, is_primary FROM file WHERE asset_id = ? ORDER BY is_primary DESC, id`,
+        `SELECT id, path, role, mime, sha256, bytes, is_primary, encrypted_path AS encryptedPath FROM file WHERE asset_id = ? ORDER BY is_primary DESC, id`,
       )
       .all(Number(key)) as {
       id: number
@@ -272,6 +272,7 @@ export function vaultFiles(
       sha256: string
       bytes: number
       is_primary: number
+      encryptedPath: string | null
     }[]
   ).map((f) => ({ ...f, primary: f.is_primary === 1 }))
 }

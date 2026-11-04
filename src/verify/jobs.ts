@@ -13,7 +13,7 @@ export const VERIFY_DECODE = 'verify-decode'
  */
 export function verifyHandler(db: Db, mediaRoot: string, deps: DecodeDeps, now: () => number = Date.now) {
   const files = db.prepare(
-    `SELECT id, path, mime, verify_level FROM file WHERE asset_id = ? ORDER BY is_primary DESC, id`,
+    `SELECT id, path, mime, verify_level FROM file WHERE asset_id = ? AND encrypted_path IS NULL ORDER BY is_primary DESC, id`,
   )
   const pass = db.prepare(
     `UPDATE file SET verify_level = 3, verified_at = ?, decode_error = NULL WHERE id = ?`,

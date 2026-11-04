@@ -159,6 +159,21 @@ describe('thumbnails', () => {
     expect(hasThumbs(cache, sha)).toBe(true)
   })
 
+  it.each(['hidden', 'deleted'] as const)('does not recreate disk thumbnails or endlessly requeue a %s item', async privacy => {
+    const { assetId, sha } = addAsset('2026/private.jpg', await jpeg(800, 600), 'image/jpeg')
+    const queue = new JobQueue(db)
+    if (privacy === 'hidden') db.prepare('UPDATE asset SET hidden = 1 WHERE id = ?').run(assetId)
+    // Seed a queued job first: a visible item may become private while waiting.
+    queue.enqueue(THUMBNAIL, assetId)
+    if (privacy === 'deleted') db.prepare('UPDATE asset SET deleted_at = 1 WHERE id = ?').run(assetId)
+    await runThumbnails(db, queue, media, cache, { heic }, { concurrency: 1 })
+    expect(queue.counts(THUMBNAIL)).toMatchObject({ done: 1, queued: 0, failed: 0 })
+    expect(hasThumbs(cache, sha)).toBe(false)
+    expect(queueThumbnails(db, queue, cache)).toEqual({ added: 0, requeued: 0 })
+    expect(queueThumbnails(db, queue, cache)).toEqual({ added: 0, requeued: 0 })
+    expect(queue.counts(THUMBNAIL)).toMatchObject({ done: 1, queued: 0, running: 0 })
+  })
+
   it('renders identical bytes once for two assets', async () => {
     const bytes = await jpeg(800, 600)
     addAsset('2026/one.jpg', bytes, 'image/jpeg')

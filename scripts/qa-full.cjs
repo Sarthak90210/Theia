@@ -33,8 +33,8 @@ app.on('browser-window-created', (_, win) => {
   win.show()
   win.setContentSize(1280, 820)
   win.webContents.once('did-finish-load', async () => {
-    const js = (code) => win.webContents.executeJavaScript(`(async()=>{${code}})()`)
-    const frame = () => js('await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))')
+    const js = (code) => Promise.race([win.webContents.executeJavaScript(`(async()=>{${code}})()`), new Promise((_,reject)=>setTimeout(()=>reject(new Error('Renderer did not answer within 20 seconds')),20000))])
+    const frame = () => js('await Promise.race([new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))),new Promise(r=>setTimeout(r,80))])')
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
     const wait = async (cond, what, timeout = 20000) => {
       const end = Date.now() + timeout
@@ -87,10 +87,34 @@ app.on('browser-window-created', (_, win) => {
       win.webContents.sendInputEvent({ type: 'keyUp', keyCode, modifiers })
       await frame()
     }
+    // Type into a field with real keystrokes, so controlled inputs see them.
+    const typeText = async (sel, text) => {
+      await click(sel)
+      await js(`const e=document.querySelector(${JSON.stringify(sel)});e.focus();e.select&&e.select()`)
+      for (const ch of text) win.webContents.sendInputEvent({ type: 'char', keyCode: ch })
+      await frame()
+    }
+    // The test vault's database, read-only, to check files on disk.
+    const galleryDb = () => {
+      const Database = require('better-sqlite3')
+      return new Database(path.join(root, 'Gallery', '.vault', 'library.db'), { readonly: true, fileMustExist: true })
+    }
+    const filesOf = (key) => {
+      const db = galleryDb()
+      try {
+        return db.prepare('SELECT path, sha256, encrypted_path FROM file WHERE asset_id = ?').all(Number(key))
+      } finally {
+        db.close()
+      }
+    }
+    const plainOnDisk = (key) => filesOf(key).filter((f) => fs.existsSync(path.join(root, 'Gallery', ...f.path.split('/'))))
+    const sha256 = (file) => require('node:crypto').createHash('sha256').update(fs.readFileSync(file)).digest('hex')
+    const PASSCODE = 'theia-qa-2026'
     const capture = async (name) => {
       await frame()
       await sleep(150)
-      fs.writeFileSync(path.join(out, `${name}.png`), (await win.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG())
+      const capture = await Promise.race([win.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true }),new Promise((_,reject)=>setTimeout(()=>reject(new Error('Screenshot capture timed out')),8000))])
+      fs.writeFileSync(path.join(out, `${name}.png`), capture.toPNG())
       results.captures.push(name)
     }
     // Layout problems a person would see: overflow, controls off-screen or overlapping.
@@ -297,12 +321,71 @@ app.on('browser-window-created', (_, win) => {
         await wait(`!document.querySelector('.selection-bar')`, 'Esc ends selection')
       })
 
+      await step('Hidden stays locked until a passcode is set, and setting one encrypts it', async () => {
+        await sideClick('Hidden')
+        await wait(`document.querySelector('.locked-collection')`, 'locked screen for Hidden')
+        await expect(`!document.querySelector('.tile')`, 'no hidden tiles shown before a passcode exists')
+        await capture('08a-hidden-no-passcode')
+        await pressButton('Set a passcode', '.locked-collection')
+        await wait(`document.querySelector('.protect-dialog')`, 'passcode dialog')
+        const inputs = await js(`return document.querySelectorAll('.protect-dialog input[type=password]').length`)
+        if (inputs !== 2) throw new Error('expected two passcode fields')
+        await typeText('.protect-dialog label:nth-of-type(1) input', PASSCODE)
+        await typeText('.protect-dialog label:nth-of-type(2) input', PASSCODE)
+        await pressButton('Set passcode', '.protect-dialog')
+        await wait(`document.querySelector('.recovery-key')`, 'recovery key shown', 60000)
+        results.recoveryKey = await js(`return document.querySelector('.recovery-key').textContent.trim()`)
+        if (!/^([A-Z0-9]{5}-){4}[A-Z0-9]{5}$/.test(results.recoveryKey)) throw new Error(`odd recovery key: ${results.recoveryKey}`)
+        await capture('08b-recovery-key')
+        await expect(`${button('Done', '.protect-dialog')}.disabled`, 'Done waits until the key is saved')
+        await click('.protect-check input')
+        await pressButton('Done', '.protect-dialog')
+        await wait(`!document.querySelector('.protect-dialog')`, 'dialog closed')
+        // The fixture's hidden and deleted items are now encrypted on disk.
+        for (const k of [fixture.hiddenKey, fixture.deletedKey]) {
+          const left = plainOnDisk(k)
+          if (left.length) throw new Error(`plain copy still on disk for ${k}: ${left.map((f) => f.path)}`)
+          if (!filesOf(k).every((f) => f.encrypted_path)) throw new Error(`item ${k} is not encrypted`)
+        }
+        // Unlocked right after setup: the hidden photos show, made in memory.
+        await wait(`document.querySelector('${tileSel(fixture.hiddenKey)} img')?.naturalWidth>0`, 'hidden photo shows while unlocked')
+        await capture('08c-hidden-unlocked')
+      })
+
+      await step('Lock, a wrong passcode is refused, the right one opens it', async () => {
+        await click(tileSel(fixture.hiddenKey))
+        await wait(`document.querySelector('.viewer')`, 'private item open in viewer')
+        await js(`await window.photos.lockVault(${JSON.stringify(fixture.vaultId)})`)
+        await wait(`!document.querySelector('.viewer')`, 'locking removes the open private photo')
+        await wait(`document.querySelector('.locked-collection .unlock-form')`, 'locked again')
+        await expect(`!document.querySelector('.tile')`, 'nothing shown while locked')
+        await typeText('.unlock-form input', 'not the passcode')
+        await pressButton('Unlock', '.unlock-form')
+        await wait(`document.querySelector('.unlock-form [role=alert]')`, 'wrong passcode refused', 30000)
+        await capture('08d-wrong-passcode')
+        await typeText('.unlock-form input', PASSCODE)
+        await pressButton('Unlock', '.unlock-form')
+        await wait(`document.querySelector('${tileSel(fixture.hiddenKey)} img')?.naturalWidth>0`, 'unlocked with the passcode', 30000)
+        // The recovery key works too.
+        await pressButton('Lock Hidden and Recently Deleted', '.toolbar')
+        await wait(`document.querySelector('.locked-collection .unlock-form')`, 'locked again')
+        await pressButton('Use the recovery key', '.unlock-form')
+        await typeText('.unlock-form input', results.recoveryKey.toLowerCase())
+        await pressButton('Unlock', '.unlock-form')
+        await wait(`document.querySelector('${tileSel(fixture.hiddenKey)} img')?.naturalWidth>0`, 'unlocked with the recovery key', 30000)
+        await sideClick('Library')
+        await wait(`${tiles}.length>0`, 'library again')
+      })
+
       await step('Hide and Unhide from a selection', async () => {
+        const plainBefore = new Map(filesOf(keys[5]).map((f) => [f.path, sha256(path.join(root, 'Gallery', ...f.path.split('/')))]))
         const k = keys[5]
         await pressButton('Select', '.toolbar')
         await click(tileSel(k))
         await pressButton('Hide', '.selection-bar')
         await wait(`!document.querySelector('${tileSel(k)}')`, 'hidden item leaves the library')
+        await sleep(500)
+        if (plainOnDisk(k).length) throw new Error('hiding left a plain copy on disk')
         await sideClick('Hidden')
         await wait(`document.querySelector('${tileSel(k)}')`, 'item in Hidden')
         await capture('08-hidden')
@@ -310,6 +393,10 @@ app.on('browser-window-created', (_, win) => {
         await click(tileSel(k))
         await pressButton('Unhide', '.selection-bar')
         await wait(`!document.querySelector('${tileSel(k)}')`, 'unhidden')
+        for (const [p, want] of plainBefore) {
+          const file = path.join(root, 'Gallery', ...p.split('/'))
+          if (!fs.existsSync(file) || sha256(file) !== want) throw new Error(`unhiding did not restore ${p} exactly`)
+        }
         await sideClick('Library')
         await wait(`document.querySelector('${tileSel(k)}')`, 'back in the library')
       })
@@ -615,6 +702,41 @@ app.on('browser-window-created', (_, win) => {
         await wait(`document.querySelector('${tileSel(fixture.photoKey)}')`, 'refresh retains the library')
       })
 
+      await step('vault details show where it lives, and an empty vault can be deleted', async () => {
+        const archive = path.join(root, 'Archive')
+        if (!fs.existsSync(archive)) throw new Error('fixture Archive vault missing')
+        const row = await js(`const b=${side('Archive')};const more=b.parentElement.querySelector('.side-more');const r=more.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2}`)
+        await clickAt(row.x, row.y)
+        await wait(`document.querySelector('.vault-dialog .vault-path')`, 'vault details')
+        await wait(`/Size on disk/.test(document.querySelector('.vault-dialog').textContent)`, 'size shown')
+        const shown = await js(`return document.querySelector('.vault-dialog .vault-path').textContent`)
+        if (path.resolve(shown) !== path.resolve(archive)) throw new Error(`location shows ${shown}`)
+        await capture('31-vault-details')
+        await pressButton('Delete…', '.vault-dialog')
+        await wait(`document.querySelector('.vault-type input')`, 'delete confirmation')
+        await expect(`${button('Move to Recycle Bin', '.vault-dialog')}?.disabled`, 'delete waits for the typed name')
+        await typeText('.vault-type input', 'Archive')
+        await capture('32-vault-delete')
+        await pressButton('Move to Recycle Bin', '.vault-dialog')
+        await wait(`!${side('Archive')}`, 'Archive gone from the sidebar', 30000)
+        // The message appears once Windows has confirmed the move.
+        await wait(`document.querySelector('.toast')?.textContent.includes('Recycle Bin')`, 'confirmed in the Recycle Bin', 30000)
+        if (fs.existsSync(archive)) throw new Error('Archive folder still on disk')
+      })
+
+      await step('vault location is visible and deletion requires the exact vault name', async () => {
+        await click('button[aria-label="Gallery: location and options"]')
+        await wait(`document.querySelector('.vault-dialog .vault-path')`, 'vault location dialog')
+        await expect(`document.querySelector('.vault-path').textContent.includes('Gallery')`, 'real vault location shown')
+        await capture('31-vault-location')
+        await pressButton('Delete…', '.vault-dialog')
+        await wait(`document.querySelector('.vault-type input')`, 'name confirmation')
+        await typeText('.vault-type input', 'Wrong name')
+        await expect(`document.querySelector('.vault-dialog .primary.destructive-action').disabled`, 'wrong name cannot delete')
+        await pressButton('Back', '.vault-dialog')
+        await pressButton('Done', '.vault-dialog')
+      })
+
       await step('sidebar hides and returns', async () => {
         win.setContentSize(1280, 820)
         await sleep(300)
@@ -631,6 +753,7 @@ app.on('browser-window-created', (_, win) => {
 
       results.ok = true
     } catch (e) {
+      console.error(current, e)
       results.error = `${current}: ${e.message}`
       results.screenText = await js('return document.body.innerText.slice(0,1500)').catch(() => null)
       results.focused = await js('const a=document.activeElement;return a?a.outerHTML.slice(0,240):null').catch(() => null)

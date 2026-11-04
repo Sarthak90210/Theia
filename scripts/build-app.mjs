@@ -13,6 +13,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
+import { prepareWpd } from './prepare-wpd.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const out = path.join(root, 'dist-app')
@@ -21,6 +22,7 @@ const release = process.argv.includes('--release')
 
 fs.rmSync(out, { recursive: true, force: true })
 fs.mkdirSync(path.join(out, 'renderer'), { recursive: true })
+await prepareWpd(path.join(out, 'wpd'))
 
 const external = ['electron', 'better-sqlite3', 'sharp', 'exiftool-vendored', 'libheif-js']
 

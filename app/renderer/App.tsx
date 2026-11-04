@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { AppState, Collections, GalleryItem, SourceId } from '../shared/api.ts'
 import { DiagnosisView } from './Diagnosis.tsx'
-import { count, plural } from './format.ts'
+import { count, plural, cleanError } from './format.ts'
 import { Grid } from './Grid.tsx'
 import * as I from './icons.tsx'
 import { InfoPanel } from './InfoPanel.tsx'
@@ -11,6 +11,8 @@ import { Sidebar } from './Sidebar.tsx'
 import { Editor } from './Editor.tsx'
 import { VaultActions } from './VaultActions.tsx'
 import { Viewer } from './Viewer.tsx'
+import { VaultDialog } from './VaultDialog.tsx'
+import { LockedCollection, SetUpProtection, UnlockDialog } from './Protection.tsx'
 import { Preferences, type PreferencesPage } from './Preferences.tsx'
 
 const VIEWS: { id: View; name: string }[] = [
@@ -50,6 +52,9 @@ export function App() {
   const [editor, setEditor] = useState<GalleryItem | null>(null)
   const [refresh, setRefresh] = useState(0)
   const [notice, setNotice] = useState<string | null>(null)
+  const [vaultDialog, setVaultDialog] = useState<SourceId | null>(null)
+  /** fromAction: opened because Hide, Delete or Recover needed it, so say to try again. */
+  const [protect, setProtect] = useState<{ kind: 'setup' | 'unlock'; vault: SourceId; fromAction?: boolean } | null>(null)
   // Messages go away by themselves; errors stay a little longer to be read.
   useEffect(() => {
     if (!notice) return
@@ -69,6 +74,11 @@ export function App() {
   // Reload when the source's contents change, such as after a save into it.
   const sourceRevision = vault?.revision ?? 0
   const sourceCount = vault?.count ?? device?.count ?? null
+  useEffect(() => {
+    if ((collection === 'hidden' || collection === 'deleted') && vault?.protection !== 'unlocked') {
+      setViewerKey(null); setFocusKey(null); setSelected(new Set()); setInfoOpen(false)
+    }
+  }, [collection, vault?.protection])
 
   // Pick a source on start, and another one when the selected phone is unplugged.
   useEffect(() => {
@@ -224,7 +234,13 @@ export function App() {
   const infoKey =
     viewer !== null ? (list[viewer]?.key ?? null) : selecting ? (selected.size === 1 ? [...selected][0]! : null) : focusKey
   const allSelected = list.length > 0 && selected.size === list.length
-  const showError = (m: string) => setNotice(m)
+  // An action that needs a passcode first opens the right dialog instead of an error.
+  const showError = (m: string) => {
+    if (vault && m.includes('PROTECTION_NEEDED')) return setProtect({ kind: 'setup', vault: vault.id, fromAction: true })
+    if (vault && m.includes('LOCKED:')) return setProtect({ kind: 'unlock', vault: vault.id, fromAction: true })
+    setNotice(cleanError(m))
+  }
+  const privateCollection = collection === 'hidden' || collection === 'deleted'
 
   let body: React.ReactNode
   if (source === DIAGNOSIS || device?.state === 'problem') {
@@ -247,6 +263,17 @@ export function App() {
         <h2>Reading {device.name}</h2>
         <p className="muted">Loading the phone's library. Keep the phone unlocked.</p>
       </div>
+    )
+  } else if (vault && privateCollection && vault.protection !== 'unlocked') {
+    body = (
+      <LockedCollection
+        vault={vault.id}
+        vaultName={vault.name}
+        what={collection as 'hidden' | 'deleted'}
+        protection={vault.protection}
+        count={items?.length ?? null}
+        onSetUp={() => setProtect({ kind: 'setup', vault: vault.id })}
+      />
     )
   } else if (loadError) {
     body = (
@@ -308,6 +335,7 @@ export function App() {
         onSource={choose}
         onCollection={pickCollection}
         onOpenVault={() => void openVault()}
+        onVaultOptions={setVaultDialog}
         onSettings={() => setPreferences('settings')}
         onShortcuts={() => setPreferences('shortcuts')}
       />}
@@ -324,7 +352,7 @@ export function App() {
             </div>
             <div className="toolbar-actions">
               {device && <button className="ghost icon" aria-label="Refresh iPhone" title="Refresh iPhone" onClick={() => void window.photos.retryDevice(source!).then(() => setRefresh(n => n + 1)).catch(e => showError(e.message))}><I.Refresh /></button>}
-              {selecting ? (
+              {vault && privateCollection && vault.protection !== 'unlocked' ? null : selecting ? (
                 <>
                   <button className="ghost" onClick={() => (allSelected ? clearSelection() : setSelected(new Set(keysAll)))}>
                     {allSelected ? 'Deselect All' : 'Select All'}
@@ -340,6 +368,11 @@ export function App() {
                   </button>
                   <SaveMenu state={state} source={source!} keys={saveKeys} label={saveLabel} primary onError={showError} />
                 </>
+              )}
+              {vault && privateCollection && vault.protection === 'unlocked' && (
+                <button className="ghost lock-button" onClick={() => void window.photos.lockVault(vault.id)} title="Lock Hidden and Recently Deleted">
+                  <I.Lock size={16} /> Lock
+                </button>
               )}
               <button className={`ghost icon ${infoOpen ? 'on' : ''}`} onClick={() => setInfoOpen((o) => !o)} aria-label="Info" aria-pressed={infoOpen} title="Info (Ctrl+I)"><I.Info /></button>
             </div>
@@ -389,11 +422,12 @@ export function App() {
             <SaveMenu state={state} source={source!} keys={[...selected]} label={`Save ${count(selected.size)} to…`} primary onError={showError} />
           </>}
         </div>}
+        {vault?.protectionError && <div className="collection-note bad" role="alert">Protection incomplete: {vault.protectionError}</div>}
         {showToolbar && collection === 'deleted' && <div className="collection-note">
-          {vault ? 'Deleted items stay here until you recover them or choose Delete permanently.' : 'Recently Deleted on your iPhone. View or save available items here; recover or delete them on the iPhone.'}
+          {vault ? 'Deleted items are encrypted and stay here until you recover them or delete them permanently.' : "Recently Deleted on your iPhone. You can view and save these here; recover or delete them on the iPhone. Theia never keeps copies of them in its cache."}
         </div>}
         {showToolbar && collection === 'hidden' && <div className="collection-note">
-          {vault ? 'Hidden items are excluded from the library and albums. Hiding applies inside this app; files are not encrypted.' : 'Hidden on your iPhone. Some originals may be unavailable over USB. Change their hidden status on the iPhone.'}
+          {vault ? 'Hidden items are encrypted in the vault folder and left out of the library and albums. Theia asks for the passcode to show them.' : "Hidden on your iPhone. Change what's hidden on the iPhone. Some originals may not be readable over USB. Theia never keeps copies of them in its cache."}
         </div>}
         <div className="stage">
           {body}
@@ -437,6 +471,44 @@ export function App() {
           onClose={() => setEditor(null)} onSaved={(key) => {
             setEditor(null); setViewer(null); setRefresh(n => n + 1); setScrollTo(key); setFocusKey(key); setNotice('Edited copy saved. Your original is unchanged.')
           }} />}
+        {protect && protect.kind === 'setup' && (
+          <SetUpProtection
+            vault={protect.vault}
+            vaultName={state.vaults.find((v) => v.id === protect.vault)?.name ?? 'this vault'}
+            onCancel={() => setProtect(null)}
+            onDone={() => {
+              setNotice(
+                protect.fromAction
+                  ? 'Hidden and Recently Deleted are now encrypted. Hide or delete again to finish.'
+                  : 'Hidden and Recently Deleted are now encrypted.',
+              )
+              setProtect(null)
+            }}
+          />
+        )}
+        {protect && protect.kind === 'unlock' && (
+          <UnlockDialog
+            vault={protect.vault}
+            vaultName={state.vaults.find((v) => v.id === protect.vault)?.name ?? 'this vault'}
+            onCancel={() => setProtect(null)}
+            onDone={() => {
+              if (protect.fromAction) setNotice('Unlocked. Try that again.')
+              setProtect(null)
+            }}
+          />
+        )}
+        {vaultDialog && (
+          <VaultDialog
+            id={vaultDialog}
+            onClose={() => setVaultDialog(null)}
+            onGone={(message) => {
+              if (source === vaultDialog) choose(null)
+              setVaultDialog(null)
+              setNotice(message)
+            }}
+            onError={showError}
+          />
+        )}
         {notice && (
           <div className="toast" role="alert">
             <span>{notice}</span>

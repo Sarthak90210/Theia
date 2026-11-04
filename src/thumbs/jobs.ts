@@ -1,7 +1,8 @@
 import path from 'node:path'
+import fs from 'node:fs'
 import type { Db } from '../library/db.ts'
 import { drain, PermanentJobError, type Job, type JobQueue, type RunOptions } from '../jobs/queue.ts'
-import { hasThumbs, renderThumbnails, type RenderDeps } from './render.ts'
+import { hasThumbs, renderThumbnails, thumbPath, SIZES, type ThumbSize, type RenderDeps } from './render.ts'
 
 export const THUMBNAIL = 'thumbnail'
 
@@ -22,8 +23,8 @@ export function queueThumbnails(db: Db, queue: JobQueue, cacheRoot: string): { a
   const done = db
     .prepare(
       `SELECT j.asset_id, f.sha256
-         FROM job j JOIN file f ON f.asset_id = j.asset_id AND f.is_primary = 1
-        WHERE j.kind = ? AND j.state = 'done'`,
+         FROM job j JOIN file f ON f.asset_id = j.asset_id AND f.is_primary = 1 JOIN asset a ON a.id = j.asset_id
+        WHERE j.kind = ? AND j.state = 'done' AND f.encrypted_path IS NULL AND a.hidden = 0 AND a.deleted_at IS NULL`,
     )
     .all(THUMBNAIL) as { asset_id: number; sha256: string }[]
 
@@ -39,7 +40,7 @@ export function queueThumbnails(db: Db, queue: JobQueue, cacheRoot: string): { a
 
 export function thumbnailHandler(db: Db, mediaRoot: string, cacheRoot: string, deps: RenderDeps) {
   const primary = db.prepare(
-    `SELECT f.path, f.mime, f.sha256, a.width
+    `SELECT f.path, f.mime, f.sha256, a.width, f.encrypted_path, a.hidden, a.deleted_at
        FROM file f JOIN asset a ON a.id = f.asset_id
       WHERE f.asset_id = ? AND f.is_primary = 1`,
   )
@@ -55,11 +56,20 @@ export function thumbnailHandler(db: Db, mediaRoot: string, cacheRoot: string, d
   return async (job: Job) => {
     const file = primary.get(job.assetId) as PrimaryFile | undefined
     if (!file) throw new PermanentJobError(`asset ${job.assetId} has no primary file`)
+    // Hidden or deleted, so encrypted: a thumbnail on disk would show it.
+    const privacy = file as PrimaryFile & { encrypted_path?: string | null; hidden: number; deleted_at: number | null }
+    if (privacy.encrypted_path || privacy.hidden || privacy.deleted_at !== null) return
     // Content-addressed: identical bytes already rendered for another asset.
     if (hasThumbs(cacheRoot, file.sha256) && file.width !== null) return
 
     const abs = path.join(mediaRoot, ...file.path.split('/'))
     const size = await renderThumbnails(abs, file.mime, file.sha256, cacheRoot, deps)
+    const now = primary.get(job.assetId) as typeof privacy | undefined
+    if (!now || now.encrypted_path || now.hidden || now.deleted_at !== null) {
+      const visible = db.prepare(`SELECT 1 FROM file f JOIN asset a ON a.id=f.asset_id WHERE f.sha256=? AND a.hidden=0 AND a.deleted_at IS NULL AND f.encrypted_path IS NULL LIMIT 1`).get(file.sha256)
+      if (!visible) for (const s of Object.keys(SIZES) as ThumbSize[]) fs.rmSync(thumbPath(cacheRoot,file.sha256,s),{force:true})
+      return
+    }
     // Dimensions fall out of the decode for free, and the grid needs them to
     // lay out cells before any thumbnail has loaded.
     if (file.width === null && size.width > 0) setSize.run(size.width, size.height, Date.now(), job.assetId)

@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import type { DeviceSource } from '../device/types.ts'
+import type { DeviceFile, DeviceSource } from '../device/types.ts'
 import type { Db } from '../library/db.ts'
 import type { SaveAlbum, SaveFile, SaveItem } from '../vault/save.ts'
 import { vaultFiles } from './vault-gallery.ts'
@@ -14,7 +14,16 @@ import { mimeOf } from './phone-session.ts'
 
 /* ----------------------------------------------------------------- vault */
 
-export function vaultSaveItems(db: Db, mediaRoot: string, keys: string[]): SaveItem[] {
+/**
+ * `openProtected` reads a protected (encrypted) file, or throws when the vault
+ * is locked. Without it, a protected item can't be saved elsewhere.
+ */
+export function vaultSaveItems(
+  db: Db,
+  mediaRoot: string,
+  keys: string[],
+  openProtected?: (encryptedPath: string) => AsyncIterable<Buffer>,
+): SaveItem[] {
   const get = db.prepare(
     `SELECT a.id, kind, captured_utc, captured_offset, width, height, duration_ms, favourite, has_adjustments,
             subtype, source_uuid, a.lat, a.lon, created_at,
@@ -54,7 +63,11 @@ export function vaultSaveItems(db: Db, mediaRoot: string, keys: string[]): SaveI
         mime: f.mime,
         size: f.bytes,
         sha256: f.sha256,
-        read: () => fs.createReadStream(abs, { highWaterMark: 4 * 1024 * 1024 }),
+        read: () => {
+          if (!f.encryptedPath) return fs.createReadStream(abs, { highWaterMark: 4 * 1024 * 1024 })
+          if (!openProtected) throw new Error('This item is encrypted. Unlock Hidden and Recently Deleted to save it.')
+          return openProtected(f.encryptedPath)
+        },
       }
     })
     out.push({
@@ -135,7 +148,9 @@ export async function phoneSaveItems(session: PhoneSession, device: DeviceSource
         mime: mimeOf(name),
         size: st.size,
         sha256: null,
-        read: () => readDevice(device, p),
+        sourcePath: p,
+        sourceMtimeMs: st.mtimeMs,
+        read: () => readDevice(device, p, st),
       })
     }
     out.push({
@@ -172,15 +187,23 @@ function phoneRole(name: string, original: string, kind: SaveItem['kind']): Save
   return 'render'
 }
 
-async function* readDevice(device: DeviceSource, devicePath: string): AsyncIterable<Buffer> {
+async function* readDevice(device: DeviceSource, devicePath: string, expected: DeviceFile): AsyncIterable<Buffer> {
+  const unchanged = async () => {
+    const current = await device.stat(devicePath)
+    if (current.isDirectory || current.size !== expected.size || current.mtimeMs !== expected.mtimeMs) {
+      throw new Error(`The iPhone original changed during this save: ${devicePath}`)
+    }
+  }
+  await unchanged()
   const h = await device.open(devicePath)
   try {
     for (;;) {
       const b = await h.read(4 * 1024 * 1024)
-      if (!b.length) return
+      if (!b.length) break
       yield b
     }
   } finally {
     await h.close()
   }
+  await unchanged()
 }

@@ -23,6 +23,8 @@ export interface SidebarProps {
   onSource: (id: SourceId) => void
   onCollection: (id: string) => void
   onOpenVault: () => void
+  /** Show a vault's location, size, and remove or delete it. */
+  onVaultOptions: (id: SourceId) => void
   onSettings: () => void
   onShortcuts: () => void
 }
@@ -31,7 +33,7 @@ export interface SidebarProps {
  * Phones, then vaults, then whatever the selected one contains. Phones appear
  * here by themselves when plugged in and go when unplugged.
  */
-export function Sidebar({ state, source, collections, collection, onSource, onCollection, onOpenVault, onSettings, onShortcuts }: SidebarProps) {
+export function Sidebar({ state, source, collections, collection, onSource, onCollection, onOpenVault, onVaultOptions, onSettings, onShortcuts }: SidebarProps) {
   const noPhoneButSeen =
     state.devices.length === 0 && state.diagnosis && state.diagnosis.layers.some((l) => l.id === 'usb' && l.status === 'ok')
 
@@ -66,17 +68,25 @@ export function Sidebar({ state, source, collections, collection, onSource, onCo
       <div className="side-section">
         <div className="side-heading">Vaults</div>
         {state.vaults.map((v) => (
-          <button
-            key={v.id}
-            className={`side-item ${source === v.id ? 'active' : ''}`}
-            aria-pressed={source === v.id}
-            onClick={() => onSource(v.id)}
-            title={v.root}
-          >
-            <I.Vault />
-            <span className="side-label">{v.name}</span>
-            <span className="side-count">{count(v.count)}</span>
-          </button>
+          <div key={v.id} className="side-row">
+            <button
+              className={`side-item ${source === v.id ? 'active' : ''}`}
+              aria-pressed={source === v.id}
+              onClick={() => onSource(v.id)}
+              onContextMenu={(e) => {
+                e.preventDefault()
+                onVaultOptions(v.id)
+              }}
+              title={v.root}
+            >
+              <I.Vault />
+              <span className="side-label">{v.name}</span>
+              <span className="side-count">{count(v.count)}</span>
+            </button>
+            <button className="side-more" aria-label={`${v.name}: location and options`} title="Location and options" onClick={() => onVaultOptions(v.id)}>
+              <span aria-hidden="true">⋯</span>
+            </button>
+          </div>
         ))}
         <button className="side-item subtle" onClick={onOpenVault}>
           <I.Plus />

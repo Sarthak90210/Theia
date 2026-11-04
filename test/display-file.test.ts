@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { displayFile } from '../src/gallery/vault-gallery.ts'
 
-const f = (id: number, role: string, mime: string, primary = false) => ({ id, path: `p${id}`, role, mime, sha256: `s${id}`, bytes: 1, primary })
+const f = (id: number, role: string, mime: string, primary = false) => ({ id, path: `p${id}`, role, mime, sha256: `s${id}`, bytes: 1, primary, encryptedPath: null })
 
 describe('which vault file is drawn', () => {
   it('shows the edited render by default, like the phone', () => {

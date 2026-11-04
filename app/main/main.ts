@@ -1,6 +1,7 @@
 import fs from 'node:fs'
+import { execFile } from 'node:child_process'
 import path from 'node:path'
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme, net, powerSaveBlocker, protocol, shell } from 'electron'
+import { app, BrowserWindow, dialog, powerMonitor, ipcMain, nativeTheme, net, powerSaveBlocker, protocol, shell } from 'electron'
 import { INVOKE_CHANNELS, MEDIA_SCHEME, STATE_CHANNEL, type AppState } from '../shared/api.ts'
 import { GalleryService } from './gallery-service.ts'
 import { MapTiles } from './map-tiles.ts'
@@ -99,6 +100,7 @@ app.whenReady().then(async () => {
     showInFolder: (p) => shell.showItemInFolder(p),
     openExternal: (url) => shell.openExternal(url),
     trash: (file) => shell.trashItem(file),
+    recycleBinLimit,
     setBusy: (busy) => {
       if (busy && blocker === null) blocker = powerSaveBlocker.start('prevent-app-suspension')
       if (!busy && blocker !== null) {
@@ -130,7 +132,7 @@ app.whenReady().then(async () => {
       // Range answers by hand: protocol.handle does not do them, and without
       // a 206 a video cannot seek. Videos and previews can change (a
       // conversion finishing), so only images are cached for long.
-      const cache = key.includes('~') && what !== 'video' && what !== 'storyboard' ? 'max-age=31536000, immutable' : 'no-cache'
+      const cache = 'no-store'
       const res = await rangeResponse('path' in m ? { file: m.path } : { source: m.source }, req.headers.get('range'), {
         'Content-Type': m.mime,
         'Cache-Control': cache,
@@ -150,14 +152,19 @@ app.whenReady().then(async () => {
     ipcMain.handle(`photos:${channel}`, async (_e, ...args: unknown[]) => {
       const fn = (service as unknown as Record<string, (...a: unknown[]) => unknown>)[methods[channel] ?? channel]
       const result = await fn!.apply(service, args)
+      if (['setUpProtection', 'lockVault', 'setHidden', 'remove', 'closeVault'].includes(channel)) await win?.webContents.session.clearCache()
       if (channel === 'setSettings' && !service!.mapsEnabled()) mapTiles?.cancel()
       return result
     })
   }
 
   createWindow()
+  await win!.webContents.session.clearCache()
   if (smokeDirectory) await runPackagedSmoke(path.resolve(smokeDirectory), win!)
   else service.start()
+  // Hidden and Recently Deleted lock again when Windows locks or sleeps.
+  powerMonitor.on('lock-screen', () => service?.lockAll())
+  powerMonitor.on('suspend', () => service?.lockAll())
   if (THEIA_DEVELOPMENT && devHarnessDir) startDevHarness(devHarnessDir)
 })
 
@@ -205,4 +212,31 @@ function startDevHarness(dir: string) {
       if (typeof fn === 'function') void Promise.resolve(fn.apply(service, args)).catch((e) => console.error(`[dev] ${name}`, e))
     }
   }, 300)
+}
+
+/**
+ * The Recycle Bin's size limit for the drive holding `dir`. Windows keeps it
+ * per volume in the registry (MaxCapacity, in MB), and deletes anything bigger
+ * outright instead of recycling it, so deleting a vault checks it first.
+ */
+function recycleBinLimit(dir: string): Promise<{ maxBytes: number; nukeOnDelete: boolean } | null> {
+  const drive = path.parse(path.resolve(dir)).root.slice(0, 1)
+  if (!/^[A-Za-z]$/.test(drive)) return Promise.resolve(null)
+  const script = [
+    `$v = Get-Volume -DriveLetter ${drive} -ErrorAction Stop`,
+    `$g = [regex]::Match($v.UniqueId, '[{][0-9a-fA-F-]+[}]').Value`,
+    `$k = Get-ItemProperty -Path ('HKCU:/Software/Microsoft/Windows/CurrentVersion/Explorer/BitBucket/Volume/' + $g) -ErrorAction Stop`,
+    `@{ max = [int64]$k.MaxCapacity; nuke = [int]$k.NukeOnDelete } | ConvertTo-Json -Compress`,
+  ].join('; ')
+  return new Promise((resolve) => {
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 15000 }, (err, out) => {
+      if (err) return resolve(null)
+      try {
+        const j = JSON.parse(out) as { max: number; nuke: number }
+        resolve(j.max > 0 ? { maxBytes: j.max * 1024 * 1024, nukeOnDelete: j.nuke === 1 } : null)
+      } catch {
+        resolve(null)
+      }
+    })
+  })
 }

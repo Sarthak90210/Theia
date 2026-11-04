@@ -53,6 +53,19 @@ export function monthLabel(d: Date): string {
   return `${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`
 }
 
+/** "About 2 min left". Rounded the way people say it, never falsely precise. */
+export function remainingLabel(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined) return 'Estimating time left…'
+  const s = Math.max(0, Math.round(ms / 1000))
+  if (s < 5) return 'Almost done'
+  if (s < 60) return `About ${Math.max(5, Math.round(s / 5) * 5)} s left`
+  const m = Math.round(s / 60)
+  if (m < 60) return `About ${m} min left`
+  const h = Math.floor(m / 60)
+  const rest = m % 60
+  return rest ? `About ${h} h ${rest} min left` : `About ${h} h left`
+}
+
 /** 3:29 PM, as the phone shows it. */
 export function timeLabel(d: Date): string {
   const h = d.getUTCHours()
@@ -163,4 +176,16 @@ export function exposureLabel(seconds: number | null): string | null {
   if (!seconds) return null
   if (seconds >= 1) return `${seconds.toFixed(seconds >= 10 ? 0 : 1)} s`
   return `1/${Math.round(1 / seconds)} s`
+}
+
+/**
+ * An error as a person should read it: without Electron's "Error invoking
+ * remote method '...':" wrapper, the error's class name, or Theia's own
+ * routing prefixes (LOCKED, PROTECTION_NEEDED).
+ */
+export function cleanError(message: string): string {
+  return message
+    .replace(/^Error invoking remote method '[^']*':\s*/, '')
+    .replace(/^(?:[A-Z][A-Za-z]*(?:Error|Secret|Vault|Cancelled)|Error):\s*/, '')
+    .replace(/^(?:LOCKED|PROTECTION_NEEDED):\s*/, '')
 }

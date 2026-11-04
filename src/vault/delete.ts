@@ -51,15 +51,18 @@ export async function purgeAssets(
   mediaRoot: string,
   ids: number[],
   trash: (file: string) => Promise<void>,
+  /** Where protected (encrypted) files live, for items that are. */
+  privateFolder?: string,
 ): Promise<PurgeResult> {
   const result: PurgeResult = { removed: 0, failed: [] }
   for (const id of ids) {
     const deleted = db.prepare(`SELECT 1 FROM asset WHERE id = ? AND deleted_at IS NOT NULL`).get(id)
     if (!deleted) continue
-    const files = db.prepare(`SELECT id, path, sha256 FROM file WHERE asset_id = ?`).all(id) as {
+    const files = db.prepare(`SELECT id, path, sha256, encrypted_path FROM file WHERE asset_id = ?`).all(id) as {
       id: number
       path: string
       sha256: string
+      encrypted_path: string | null
     }[]
     const folders = (
       db
@@ -69,6 +72,13 @@ export async function purgeAssets(
 
     const targets: string[] = []
     for (const f of files) {
+      // A protected file has only its encrypted copy left.
+      if (f.encrypted_path) {
+        if (!privateFolder) throw new Error('This item is encrypted; its private folder is needed to delete it.')
+        const blob = path.join(privateFolder, f.encrypted_path)
+        if (fs.existsSync(blob)) targets.push(blob)
+        continue
+      }
       const main = path.join(mediaRoot, ...f.path.split('/'))
       if (fs.existsSync(main)) targets.push(main)
       for (const folder of folders) {

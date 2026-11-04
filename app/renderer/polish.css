@@ -151,6 +151,8 @@ h3 { text-transform: none; font-size: 12px; letter-spacing: 0; }
 .map-foot { color: var(--text); }
 .menu { background: var(--glass-strong); border: 1px solid var(--glass-border); border-radius: 16px; padding: 6px; box-shadow: var(--glass-edge), var(--shadow); min-width: 240px; max-width: min(320px, calc(100vw - 32px)); }
 .menu-heading { padding: 10px 10px 8px; font-size: 11px; }
+.save-cleanup-choice { display: flex; gap: 9px; align-items: flex-start; padding: 10px; font-size: 12px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.save-cleanup-choice input { flex: 0 0 auto; margin-top: 2px; accent-color: var(--accent); }
 .menu-item { padding: 9px 10px; border-radius: 10px; min-height: 36px; }
 .menu-item:hover, .menu-item:focus-visible { background: var(--accent-soft); }
 .menu-item span { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
@@ -277,3 +279,49 @@ h3 { text-transform: none; font-size: 12px; letter-spacing: 0; }
 .titlebar img { width: 26px; height: 26px; object-fit: contain; flex-shrink: 0; }
 .titlebar span { font-size: 14px; font-weight: 600; letter-spacing: -0.2px; color: var(--text); }
 .sidebar { padding-top: 14px; }
+.status-eta { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; }
+
+/* A vault row: the vault itself, and a ⋯ button for its location and options. */
+.side-row { position: relative; }
+.side-row > .side-item { padding-right: 38px; }
+.side-more {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  width: 26px; height: 26px; min-height: 26px; padding: 0; justify-content: center;
+  border: none; border-radius: 7px; background: transparent; color: var(--muted);
+  opacity: 0; transition: opacity .12s;
+}
+.side-row:hover .side-more, .side-more:focus-visible, .side-row > .side-item.active + .side-more { opacity: 1; }
+.side-more:hover { background: rgb(255 255 255 / 10%); color: var(--text); }
+.side-row:hover .side-count, .side-row > .side-item.active .side-count { visibility: hidden; }
+
+.vault-dialog { width: min(520px, calc(100vw - 48px)); }
+.vault-dialog-head { display: flex; gap: 12px; align-items: center; }
+.vault-facts { margin: 0; display: grid; gap: 10px; }
+.vault-facts div { display: grid; grid-template-columns: 110px 1fr; gap: 10px; }
+.vault-facts dt { color: var(--muted); }
+.vault-facts dd { margin: 0; }
+.vault-path { word-break: break-all; user-select: text; }
+.dialog-buttons.start { justify-content: flex-start; }
+.vault-danger { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.vault-danger p { margin: 2px 0 0; }
+.vault-warn { padding: 10px 12px; border-radius: 10px; background: var(--warn-soft); color: var(--warn); margin: 0; }
+.vault-type { display: grid; gap: 6px; }
+.vault-type input { padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface-2); color: var(--text); font: inherit; }
+
+
+/* Hidden and Recently Deleted: setting a passcode, the recovery key, unlocking. */
+.protect-dialog { width: min(480px, calc(100vw - 48px)); }
+.protect-head { display: flex; align-items: center; gap: 10px; }
+.protect-field { display: grid; gap: 6px; }
+.protect-field input { padding: 9px 11px; border-radius: 9px; border: 1px solid var(--line); background: var(--surface-2); color: var(--text); font: inherit; }
+.protect-field input:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.recovery-key {
+  font-family: 'Cascadia Mono', Consolas, monospace; font-size: 17px; letter-spacing: 1px; text-align: center;
+  padding: 14px; border-radius: 12px; background: var(--surface-2); border: 1px dashed var(--line); user-select: all;
+}
+.protect-check { display: flex; gap: 10px; align-items: center; }
+.protect-check input { width: 17px; height: 17px; }
+.locked-collection .unlock-form { width: min(340px, 100%); display: grid; gap: 10px; text-align: left; margin-top: 4px; }
+.unlock-form { display: grid; gap: 10px; }
+.unlock-actions { display: flex; justify-content: space-between; align-items: center; }
+.lock-button { gap: 6px; }

@@ -43,3 +43,24 @@ describe('info panel formatting, as the phone shows it', () => {
     expect(resolutionLabel(3840, 2160)).toBe('4K')
   })
 })
+
+describe('time left while saving', () => {
+  it('reads the way people say it', async () => {
+    const { remainingLabel } = await import('../app/renderer/format.ts')
+    expect(remainingLabel(null)).toBe('Estimating time left…')
+    expect(remainingLabel(2000)).toBe('Almost done')
+    expect(remainingLabel(37_000)).toBe('About 35 s left')
+    expect(remainingLabel(125_000)).toBe('About 2 min left')
+    expect(remainingLabel(3_900_000)).toBe('About 1 h 5 min left')
+    expect(remainingLabel(7_200_000)).toBe('About 2 h left')
+  })
+})
+
+describe('errors as people read them', () => {
+  it('drops the IPC wrapper, class names and routing prefixes', async () => {
+    const { cleanError } = await import('../app/renderer/format.ts')
+    expect(cleanError("Error invoking remote method 'photos:unlockVault': WrongSecret: That passcode isn't right.")).toBe("That passcode isn't right.")
+    expect(cleanError("Error invoking remote method 'photos:remove': Error: PROTECTION_NEEDED: Set a passcode first.")).toBe('Set a passcode first.')
+    expect(cleanError('Disk is full.')).toBe('Disk is full.')
+  })
+})

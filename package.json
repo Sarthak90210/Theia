@@ -1,7 +1,7 @@
 {
   "name": "theia",
   "productName": "Theia",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A Windows photo library and iPhone import app",
   "author": { "name": "Sarthak90210", "url": "https://github.com/Sarthak90210" },
   "license": "UNLICENSED",

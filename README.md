@@ -17,7 +17,7 @@ For an iPhone connection, install Apple Devices or iTunes so the Apple Mobile
 Device Service and USB drivers are available. Unlock the phone and accept
 its Trust prompt. Opening local vaults does not require Apple software.
 
-The first release is unsigned. Windows may show an unknown-publisher prompt.
+Release builds are unsigned. Windows may show an unknown-publisher prompt.
 Updating or uninstalling keeps the app profile and your photo vaults.
 
 To build the Windows release from source, run `npm ci` followed by
@@ -113,16 +113,38 @@ edit creates a still photo copy. Advanced Apple Photos tools and HDR video
 export are not included in this first editor.
 
 Vault items can be hidden or unhidden. Hidden items are excluded from normal
-collections and albums. This is an app collection, not encryption or an OS
-folder access restriction. Delete moves selected items to **Recently Deleted**;
+collections and albums. Set a vault passcode before hiding or deleting items.
+Hidden and Recently Deleted media are encrypted at rest with AES-256-GCM;
+the passcode or recovery key unlocks them. Save the recovery key when setting
+up protection: losing both secrets means losing access to the encrypted files.
+Dates, filenames, camera information and other database metadata remain readable.
+Delete moves selected items to **Recently Deleted**;
 **Recover** restores them, including their previous hidden state. They remain
 until explicitly removed. **Delete permanently** moves the files to the Windows
 Recycle Bin. Nothing is automatically erased after 30 days.
 
+Saving shows transfer speed and an estimated time left, including the copy's
+read-back check. In the iPhone save menu, **Delete from iPhone after verified
+save** is off by default and requires confirmation for each save. It verifies
+all originals and companion files, independently rereads both sides, fully
+decodes saved media, and verifies the exact Windows device objects while
+locking destination copies against changes. Anything unsupported, ambiguous,
+changed, incomplete or unchecked stays on the iPhone. Windows deletion may be
+permanent and may sync through iCloud Photos. It is never retried automatically.
+Extra deletion-verification work is shown as a separate phase. Live iPhone
+deletion has not yet been qualified; generated-device and driver tests cover
+the safety gates.
+
+Use the menu beside a vault in the sidebar to see or copy its location,
+open its folder, remove it from Theia while keeping files, or delete the vault.
+Folder deletion requires typing its name and validates vault ownership and
+path boundaries. Protected system/user folders and overlapping vaults are refused.
+
 The iPhone has separate **Hidden** and **Recently Deleted** collections under
 **Utilities**. Available items can be viewed and saved into a vault. The iPhone
-is read-only here; changing its hidden state, recovering or deleting its items
-is done on the iPhone. **Refresh iPhone** reloads the phone's current library.
+supports deletion only through the explicitly enabled verified-save workflow;
+changing its hidden state and recovering its items are done on the iPhone.
+**Refresh iPhone** reloads the phone's current library.
 An item whose original is not exposed over USB may only have a thumbnail.
 
 The application is called **Theia**. Its existing profile directory remains
