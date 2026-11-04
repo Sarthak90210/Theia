@@ -1,0 +1,37 @@
+appId: com.sarthak90210.theia
+productName: Theia
+asar: false
+npmRebuild: false
+directories:
+  output: release
+  buildResources: build
+files:
+  - dist-app/**
+  - '!dist-app/**/*.map'
+  - package.json
+  - THIRD-PARTY-NOTICES.md
+extraResources:
+  - from: .release-tools/ffmpeg
+    to: bin
+  - from: THIRD-PARTY-NOTICES.md
+    to: THIRD-PARTY-NOTICES.md
+win:
+  icon: build/theia.ico
+  executableName: Theia
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+nsis:
+  artifactName: Theia-Setup-${version}-${arch}.${ext}
+  oneClick: false
+  perMachine: false
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  deleteAppDataOnUninstall: false
+portable:
+  artifactName: Theia-Portable-${version}-${arch}.${ext}
+publish: null

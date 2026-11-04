@@ -3,8 +3,27 @@
 A photo library and import tool for Windows, built because the stock Photos app
 handles an iPhone badly.
 
-Stack: Electron + TypeScript. Device access via AFC over usbmuxd, with WIA/MTP
-as a fallback. v1 is the import pipeline only.
+Stack: Electron + TypeScript. Device access uses AFC over usbmuxd.
+
+## Download for Windows
+
+Download the installer or portable executable from
+[GitHub Releases](https://github.com/Sarthak90210/Theia/releases/latest).
+**Theia-Setup** installs the app and adds Start menu and desktop shortcuts.
+**Theia-Portable** runs without installation. Both target Windows x64 and
+include FFmpeg, FFprobe, ExifTool and the image decoders; Node.js is not needed.
+
+For an iPhone connection, install Apple Devices or iTunes so the Apple Mobile
+Device Service and USB drivers are available. Unlock the phone and accept
+its Trust prompt. Opening local vaults does not require Apple software.
+
+The first release is unsigned. Windows may show an unknown-publisher prompt.
+Updating or uninstalling keeps the app profile and your photo vaults.
+
+To build the Windows release from source, run `npm ci` followed by
+`npm run release:win` on Windows x64. The build verifies a pinned FFmpeg
+archive before packaging. Outputs are in `release/`. See
+[third-party notices](THIRD-PARTY-NOTICES.md) for the bundled tools.
 
 ## Documents
 
@@ -71,7 +90,8 @@ prototype/      probes kept because they answer questions on demand.
 | `npm run smoke -- 12` | Real import of N files into a test library |
 | `npm run bench` | Enumeration, throughput, concurrency against the phone |
 
-Video thumbnails and video decode checks need `ffmpeg` on PATH for now.
+Development commands need `ffmpeg` and `ffprobe` on PATH. Release executables
+include their own tools.
 
 The gallery includes Live Photo hover playback, burst-frame browsing, cover
 selection and keeping individual frames. Search, packaging and updates remain.

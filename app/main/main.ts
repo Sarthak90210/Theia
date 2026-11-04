@@ -5,6 +5,15 @@ import { INVOKE_CHANNELS, MEDIA_SCHEME, STATE_CHANNEL, type AppState } from '../
 import { GalleryService } from './gallery-service.ts'
 import { MapTiles } from './map-tiles.ts'
 import { rangeResponse } from '../../src/media/ranges.ts'
+import { preparePackagedSmoke, runPackagedSmoke } from './packaged-smoke.ts'
+
+declare const THEIA_DEVELOPMENT: boolean
+const devHarnessDir = THEIA_DEVELOPMENT && !app.isPackaged ? process.env.PHOTOS_DEV_DIR : undefined
+const smokeDirectory = app.commandLine.getSwitchValue('theia-smoke-dir')
+if (smokeDirectory) app.setPath('userData', path.join(path.resolve(smokeDirectory), 'profile'))
+// All existing media helpers use these names. Prefer the shipped tools only
+// inside this process, without modifying the user's system PATH.
+if (app.isPackaged) process.env.PATH = `${path.join(process.resourcesPath, 'bin')}${path.delimiter}${process.env.PATH ?? ''}`
 
 /**
  * Electron entry. Creates the window, serves images and videos on a custom
@@ -62,7 +71,7 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      backgroundThrottling: !process.env.PHOTOS_DEV_DIR,
+      backgroundThrottling: !devHarnessDir && !smokeDirectory,
     },
   })
   win.removeMenu()
@@ -74,7 +83,8 @@ function createWindow() {
   win.on('closed', () => (win = null))
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  if (smokeDirectory) await preparePackagedSmoke(path.resolve(smokeDirectory))
   service = new GalleryService({
     userData: app.getPath('userData'),
     publish: (state: AppState) => win?.webContents.send(STATE_CHANNEL, state),
@@ -146,8 +156,9 @@ app.whenReady().then(() => {
   }
 
   createWindow()
-  service.start()
-  if (process.env.PHOTOS_DEV_DIR) startDevHarness(process.env.PHOTOS_DEV_DIR)
+  if (smokeDirectory) await runPackagedSmoke(path.resolve(smokeDirectory), win!)
+  else service.start()
+  if (THEIA_DEVELOPMENT && devHarnessDir) startDevHarness(devHarnessDir)
 })
 
 app.on('window-all-closed', () => app.quit())

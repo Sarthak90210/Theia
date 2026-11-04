@@ -17,6 +17,7 @@ import { build } from 'esbuild'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const out = path.join(root, 'dist-app')
 const watch = process.argv.includes('--watch')
+const release = process.argv.includes('--release')
 
 fs.rmSync(out, { recursive: true, force: true })
 fs.mkdirSync(path.join(out, 'renderer'), { recursive: true })
@@ -43,6 +44,7 @@ await Promise.all([
     sourcemap: 'linked',
     logLevel: 'warning',
     ...importMetaShim,
+    define: { ...importMetaShim.define, THEIA_DEVELOPMENT: JSON.stringify(!release) },
   }),
   build({
     entryPoints: [path.join(root, 'app/preload/preload.ts')],

@@ -1,6 +1,11 @@
 {
   "name": "theia",
   "productName": "Theia",
+  "version": "0.1.0",
+  "description": "A Windows photo library and iPhone import app",
+  "author": { "name": "Sarthak90210", "url": "https://github.com/Sarthak90210" },
+  "license": "UNLICENSED",
+  "repository": { "type": "git", "url": "https://github.com/Sarthak90210/Theia.git" },
   "private": true,
   "type": "module",
   "scripts": {
@@ -15,7 +20,11 @@
     "thumbs": "tsx src/cli/thumbs.ts",
     "verify": "tsx src/cli/verify.ts",
     "app:build": "node scripts/build-app.mjs",
-    "app": "node scripts/build-app.mjs && electron ."
+    "app": "node scripts/build-app.mjs && electron .",
+    "release:prepare": "node scripts/prepare-release.mjs",
+    "release:smoke": "node scripts/smoke-release.mjs",
+    "release:dir": "npm run release:prepare && node scripts/build-app.mjs --release && electron-builder --win --x64 --dir --publish never",
+    "release:win": "npm run release:prepare && node scripts/build-app.mjs --release && electron-builder --win nsis portable --x64 --publish never"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
@@ -23,6 +32,7 @@
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
     "electron": "^44.9.2",
+    "electron-builder": "26.18.0",
     "esbuild": "^0.28.2",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
