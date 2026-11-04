@@ -1,0 +1,127 @@
+.video-trim-timeline {
+  width: 100%;
+  min-width: 0;
+  padding: 0 12px;
+  color: var(--text);
+  user-select: none;
+}
+.trim-timeline-heading, .trim-timeline-times {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+}
+.trim-timeline-heading { margin: 0 -12px 13px; font-size: 12px; }
+.trim-timeline-heading > span { font-weight: 600; }
+.trim-timeline-heading output { color: var(--muted); }
+.trim-timeline-track {
+  position: relative;
+  height: 58px;
+  width: 100%;
+  min-width: 0;
+  touch-action: none;
+  cursor: crosshair;
+}
+.trim-filmstrip {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  overflow: hidden;
+  background: var(--surface-2);
+  border-radius: 8px;
+}
+.trim-filmstrip-frame {
+  display: block;
+  height: 58px;
+  min-width: 0;
+  flex: 1 1 0;
+  background-repeat: no-repeat;
+}
+.trim-excluded {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgb(0 0 0 / 68%);
+  pointer-events: none;
+}
+.trim-selected-outline {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  min-width: 0;
+  border: 2px solid #ededf0;
+  border-radius: 5px;
+  pointer-events: none;
+  z-index: 1;
+}
+button.trim-range-handle {
+  position: absolute;
+  top: -2px;
+  height: 62px;
+  width: 20px;
+  min-height: 0;
+  padding: 0;
+  transform: translateX(-50%);
+  border: 1px solid rgb(255 255 255 / 35%);
+  border-radius: 6px;
+  background: #ededf0;
+  color: #252528;
+  cursor: ew-resize;
+  touch-action: none;
+  justify-content: center;
+  box-shadow: 0 2px 7px #0005;
+  z-index: 3;
+  transition: background .12s, box-shadow .12s;
+}
+button.trim-range-handle::before {
+  content: '';
+  position: absolute;
+  inset: -5px -5px;
+}
+button.trim-range-handle > span {
+  display: block;
+  width: 4px;
+  height: 21px;
+  border-left: 1px solid currentColor;
+  border-right: 1px solid currentColor;
+  opacity: .75;
+}
+button.trim-range-handle:hover:not(:disabled), button.trim-range-handle.is-dragging { background: #fff; box-shadow: 0 3px 11px #0007; }
+button.trim-range-handle:active:not(:disabled) { transform: translateX(-50%); }
+button.trim-range-handle:focus-visible { outline: 2px solid var(--focus, #92b2f2); outline-offset: 4px; }
+.trim-preview-playhead {
+  position: absolute;
+  top: -6px;
+  bottom: -6px;
+  width: 2px;
+  transform: translateX(-50%);
+  background: #fff;
+  box-shadow: 0 0 0 1px #0009;
+  pointer-events: none;
+  z-index: 2;
+}
+.trim-preview-playhead::before {
+  content: '';
+  position: absolute;
+  top: -1px;
+  left: -3px;
+  width: 8px;
+  height: 5px;
+  border-radius: 2px;
+  background: #fff;
+}
+.trim-timeline-times { margin-top: 11px; color: var(--muted); }
+.trim-timeline-hint { margin: 8px -12px 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.video-trim-timeline.is-disabled { opacity: .5; }
+.video-trim-timeline.is-disabled .trim-timeline-track, .video-trim-timeline.is-disabled .trim-range-handle { cursor: default; }
+@media (prefers-reduced-motion: reduce) {
+  button.trim-range-handle { transition: none; }
+}
+@media (forced-colors: active) {
+  .trim-selected-outline { border-color: Highlight; }
+  button.trim-range-handle { background: ButtonFace; color: ButtonText; border: 1px solid ButtonText; }
+  .trim-preview-playhead, .trim-preview-playhead::before { background: Highlight; }
+}

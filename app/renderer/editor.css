@@ -1,0 +1,543 @@
+/* The photo and video editor. Picture in the middle on near-black, tools in
+   the bar across the top, settings for the current tool on the right. */
+
+.ed {
+  position: fixed;
+  inset: var(--titlebar-h) 0 0 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  background: #0e0e10;
+  color: var(--text);
+  outline: none;
+  user-select: none;
+}
+
+/* ------------------------------------------------------------------ bar */
+
+.ed-bar {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--glass);
+  border-bottom: 1px solid var(--glass-border);
+  backdrop-filter: blur(28px) saturate(1.1);
+}
+.ed-bar-side {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.ed-bar-side.end {
+  justify-content: flex-end;
+}
+.ed-history {
+  display: flex;
+  gap: 2px;
+}
+.ed-tools {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 12px;
+  background: rgb(255 255 255 / 6%);
+}
+.ed-tool {
+  position: relative;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  padding: 6px 14px;
+  border-radius: 9px;
+  gap: 7px;
+  min-height: 32px;
+}
+.ed-tool:hover:not(:disabled) {
+  color: var(--text);
+  background: rgb(255 255 255 / 6%);
+}
+.ed-tool.on {
+  color: var(--text);
+  background: rgb(255 255 255 / 14%);
+}
+.ed-dot {
+  position: absolute;
+  top: 5px;
+  right: 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #f5c542;
+}
+.ed-compare {
+  gap: 7px;
+}
+.ed-compare.on {
+  background: rgb(255 255 255 / 16%);
+}
+
+/* ---------------------------------------------------------------- body */
+
+.ed-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+}
+.ed-stage {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.ed-wait {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--muted);
+}
+.ed-badge {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+  background: rgb(0 0 0 / 60%);
+  color: #fff;
+  pointer-events: none;
+}
+
+/* -------------------------------------------------------------- canvas */
+
+.ed-canvas {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  touch-action: none;
+}
+.ed-filter-defs {
+  position: absolute;
+  width: 0;
+  height: 0;
+}
+.ed-view {
+  position: relative;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.ed-canvas.mode-crop .ed-view {
+  overflow: visible;
+}
+.ed-frame {
+  position: absolute;
+  overflow: hidden;
+}
+.ed-canvas.mode-crop .ed-frame {
+  overflow: visible;
+}
+/* The picture outside the frame is clipped by a mask element instead, so the
+   handles can sit on the edge without being cut off. */
+.ed-canvas.mode-crop .ed-frame::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  box-shadow: 0 0 0 9999px #0e0e10;
+  z-index: 1;
+  pointer-events: none;
+}
+.ed-media {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  max-width: none;
+  max-height: none;
+  transform-origin: center;
+  pointer-events: none;
+}
+.ed-shade {
+  position: absolute;
+  z-index: 2;
+  background: rgb(0 0 0 / 58%);
+  pointer-events: none;
+}
+.ed-crop {
+  position: absolute;
+  z-index: 3;
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 92%);
+  cursor: move;
+  outline: none;
+}
+.ed-crop:focus-visible {
+  box-shadow: 0 0 0 2px var(--focus);
+}
+.ed-grid {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transition: opacity 0.15s;
+  pointer-events: none;
+}
+.ed-grid.shown {
+  opacity: 1;
+}
+.ed-grid i {
+  position: absolute;
+  background: rgb(255 255 255 / 45%);
+}
+.ed-grid i.v {
+  top: 0;
+  bottom: 0;
+  width: 1px;
+}
+.ed-grid i.h {
+  left: 0;
+  right: 0;
+  height: 1px;
+}
+
+.ed-handle {
+  position: absolute;
+  width: 34px;
+  height: 34px;
+  min-height: 34px;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  z-index: 4;
+}
+.ed-handle:hover:not(:disabled),
+.ed-handle:active:not(:disabled) {
+  background: transparent;
+  filter: none;
+}
+.ed-handle span {
+  position: absolute;
+  pointer-events: none;
+  filter: drop-shadow(0 1px 2px rgb(0 0 0 / 60%));
+}
+.ed-handle:focus-visible span {
+  filter: drop-shadow(0 0 3px var(--focus));
+}
+/* Corners: L-shaped brackets. */
+.ed-handle-nw { left: -17px; top: -17px; cursor: nwse-resize; }
+.ed-handle-ne { right: -17px; top: -17px; cursor: nesw-resize; }
+.ed-handle-se { right: -17px; bottom: -17px; cursor: nwse-resize; }
+.ed-handle-sw { left: -17px; bottom: -17px; cursor: nesw-resize; }
+.ed-handle-nw span, .ed-handle-ne span, .ed-handle-se span, .ed-handle-sw span {
+  width: 20px;
+  height: 20px;
+  border: 0 solid #fff;
+}
+.ed-handle-nw span { left: 14px; top: 14px; border-left-width: 3px; border-top-width: 3px; }
+.ed-handle-ne span { right: 14px; top: 14px; border-right-width: 3px; border-top-width: 3px; }
+.ed-handle-se span { right: 14px; bottom: 14px; border-right-width: 3px; border-bottom-width: 3px; }
+.ed-handle-sw span { left: 14px; bottom: 14px; border-left-width: 3px; border-bottom-width: 3px; }
+/* Edges: short bars in the middle of each side. */
+.ed-handle-n { left: calc(50% - 17px); top: -17px; cursor: ns-resize; }
+.ed-handle-s { left: calc(50% - 17px); bottom: -17px; cursor: ns-resize; }
+.ed-handle-e { right: -17px; top: calc(50% - 17px); cursor: ew-resize; }
+.ed-handle-w { left: -17px; top: calc(50% - 17px); cursor: ew-resize; }
+.ed-handle-n span, .ed-handle-s span { left: 5px; top: 15px; width: 24px; height: 3px; background: #fff; }
+.ed-handle-e span, .ed-handle-w span { left: 15px; top: 5px; width: 3px; height: 24px; background: #fff; }
+
+/* --------------------------------------------------------- under strip */
+
+.ed-under {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 10px 24px 16px;
+}
+.ed-under.trim {
+  align-items: flex-start;
+}
+.ed-play {
+  margin-top: 26px;
+  border-radius: 50%;
+}
+.ed-timeline {
+  flex: 1;
+  min-width: 0;
+  max-width: 980px;
+}
+.ed-straighten {
+  width: min(560px, 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.ed-straighten-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+.ed-straighten-label output {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  margin-left: 6px;
+}
+/* A ruler: ticks every 5 degrees, a bigger one at zero. */
+.ed-straighten input {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 26px;
+  background:
+    linear-gradient(to right, transparent calc(50% - 1px), rgb(255 255 255 / 85%) calc(50% - 1px), rgb(255 255 255 / 85%) calc(50% + 1px), transparent calc(50% + 1px)) center / 100% 18px no-repeat,
+    repeating-linear-gradient(to right, rgb(255 255 255 / 35%) 0 1px, transparent 1px calc(100% / 18)) center / 100% 10px no-repeat;
+  cursor: ew-resize;
+}
+.ed-straighten input::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 4px;
+  height: 26px;
+  border-radius: 2px;
+  background: #f5c542;
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 40%);
+}
+.ed-straighten input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+
+/* --------------------------------------------------------------- panel */
+
+.ed-panel {
+  border-left: 1px solid var(--line);
+  background: #18181b;
+  padding: 18px 18px 20px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.ed-panel section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ed-panel h3 {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0;
+}
+.ed-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.ed-row {
+  display: flex;
+  gap: 8px;
+}
+.ed-row.end {
+  justify-content: flex-end;
+}
+.ed-square {
+  flex: 1;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 6px;
+  font-size: 12px;
+  background: rgb(255 255 255 / 5%);
+  border: 1px solid var(--line);
+}
+.ed-square:hover:not(:disabled) {
+  background: rgb(255 255 255 / 10%);
+}
+.ed-aspects {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+.ed-aspects button {
+  justify-content: center;
+  padding: 7px 4px;
+  font-size: 12px;
+  background: rgb(255 255 255 / 5%);
+  border: 1px solid var(--line);
+}
+.ed-aspects button.on {
+  background: var(--text);
+  color: var(--accent-ink);
+  border-color: var(--text);
+}
+.ed-segment {
+  display: flex;
+  padding: 2px;
+  border-radius: 8px;
+  background: rgb(255 255 255 / 6%);
+}
+.ed-segment button {
+  border: none;
+  background: transparent;
+  padding: 2px 8px;
+  min-height: 24px;
+  font-size: 11px;
+  color: var(--muted);
+  border-radius: 6px;
+}
+.ed-segment button.on {
+  background: rgb(255 255 255 / 14%);
+  color: var(--text);
+}
+
+.ed-slider {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  cursor: default;
+}
+.ed-slider-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+}
+.ed-slider-head output {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+.ed-slider.changed .ed-slider-head output {
+  color: var(--text);
+}
+/* The track fills from the neutral point to the value. */
+.ed-slider input {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 22px;
+  background:
+    linear-gradient(to right, transparent var(--from), #f1f1f3 var(--from), #f1f1f3 var(--to), transparent var(--to)) center / 100% 4px no-repeat,
+    linear-gradient(rgb(255 255 255 / 16%), rgb(255 255 255 / 16%)) center / 100% 4px no-repeat;
+  cursor: pointer;
+}
+.ed-slider input::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 50%);
+}
+.ed-slider input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.ed-times {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin: 0;
+}
+.ed-times div {
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgb(255 255 255 / 5%);
+}
+.ed-times dt {
+  font-size: 11px;
+  color: var(--muted);
+}
+.ed-times dd {
+  margin: 2px 0 0;
+  font-variant-numeric: tabular-nums;
+}
+.ed-switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ed-switch small {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+}
+.ed-switch input {
+  width: 18px;
+  height: 18px;
+  accent-color: #f5c542;
+}
+.ed-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+.ed-reset {
+  align-self: flex-start;
+}
+.ed-foot {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ed-error {
+  color: var(--bad);
+  margin: 0;
+}
+
+/* -------------------------------------------------------------- confirm */
+
+.ed-confirm {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgb(0 0 0 / 50%);
+}
+.ed-confirm-card {
+  width: 340px;
+  padding: 20px;
+  border-radius: 16px;
+  background: var(--glass-strong);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ed-confirm-card h2 {
+  font-size: 16px;
+}
+button.primary.danger {
+  background: var(--bad);
+  border-color: var(--bad);
+  color: #1b0d0c;
+}
+
+@media (max-width: 980px) {
+  .ed-body {
+    grid-template-columns: minmax(0, 1fr) 260px;
+  }
+  .ed-tool span,
+  .ed-compare span {
+    display: none;
+  }
+}

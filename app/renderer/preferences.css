@@ -1,0 +1,16 @@
+.preferences-scrim { z-index: 200; padding: 22px; }
+.preferences { width: min(100%, 600px); max-height: calc(100dvh - var(--titlebar-h, 44px) - 44px); display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: 20px; box-shadow: var(--shadow); overflow: hidden; }
+.preferences-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 20px 8px; }
+.preferences-tabs { display: flex; gap: 8px; border-bottom: 1px solid var(--line); padding: 8px 20px 14px; }
+.preferences-body { padding: 20px; overflow-y: auto; }
+.privacy-setting { display: grid; gap: 14px; }
+.privacy-setting label { display: flex; gap: 12px; align-items: center; cursor: pointer; }
+.privacy-setting input { accent-color: var(--accent); width: 18px; height: 18px; }
+.privacy-setting p { margin: 0; }
+.shortcut-section + .shortcut-section { margin-top: 24px; }
+.shortcut-section h3 { margin: 0 0 10px; font-weight: 600; }
+.shortcut-section dl { margin: 0; }
+.shortcut-section dl > div { display: grid; grid-template-columns: minmax(115px, 40%) minmax(0, 1fr); gap: 16px; padding: 7px 0; border-bottom: 1px solid var(--line); }
+.shortcut-section dd { margin: 0; color: var(--muted); }
+.shortcut-section kbd { font: inherit; }
+.map-disabled { display: grid; gap: 4px; padding: 15px; }

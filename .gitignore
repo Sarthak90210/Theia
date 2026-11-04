@@ -1,0 +1,4 @@
+node_modules/
+transcripts/
+*.log
+dist-app/

@@ -1,0 +1,43 @@
+{
+  "name": "theia",
+  "productName": "Theia",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "probe": "tsx prototype/main.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "diagnose": "tsx prototype/diagnose.ts",
+    "bench": "tsx prototype/bench.ts",
+    "smoke": "tsx prototype/smoke-import.ts",
+    "import": "tsx src/cli/import.ts",
+    "thumbs": "tsx src/cli/thumbs.ts",
+    "verify": "tsx src/cli/verify.ts",
+    "app:build": "node scripts/build-app.mjs",
+    "app": "node scripts/build-app.mjs && electron ."
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "electron": "^44.9.2",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^5.0.0"
+  },
+  "dependencies": {
+    "@types/plist": "^3.0.5",
+    "better-sqlite3": "^13.0.3",
+    "bplist-parser": "^0.3.2",
+    "exiftool-vendored": "^38.0.1",
+    "libheif-js": "^1.23.5",
+    "plist": "^3.1.0",
+    "react": "^19.2.9",
+    "react-dom": "^19.2.9",
+    "sharp": "^0.35.5"
+  },
+  "main": "dist-app/main.cjs"
+}

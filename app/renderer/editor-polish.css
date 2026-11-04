@@ -1,0 +1,152 @@
+﻿/* Editor and vault dialogs share the app's neutral surfaces and glass chrome. */
+.editor-polished {
+  background: var(--bg);
+  color: var(--text);
+}
+.editor-polished .editor-bar {
+  position: relative;
+  z-index: 2;
+  min-height: 76px;
+  padding: 14px 24px;
+  background: var(--glass, var(--surface));
+  border-bottom: 1px solid var(--glass-border, var(--line));
+  backdrop-filter: blur(28px) saturate(1.1);
+  -webkit-backdrop-filter: blur(28px) saturate(1.1);
+  gap: 16px;
+}
+.editor-heading { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+.editor-heading h2 { font-size: 15px; font-weight: 600; letter-spacing: -0.2px; }
+.editor-heading > span { color: var(--muted); font-size: 11px; }
+.editor-bar .edit-cancel, .editor-bar .edit-save { min-width: 112px; min-height: 36px; justify-content: center; border-radius: 18px; }
+.editor-polished .editor-body { grid-template-columns: minmax(0, 1fr) 308px; }
+.editor-polished .editor-preview {
+  padding: 34px 40px 84px;
+  background: #111214;
+  isolation: isolate;
+}
+.editor-polished .editor-preview > img, .editor-polished .editor-preview > video {
+  filter: none;
+  border-radius: 3px;
+  transition: opacity 140ms ease;
+}
+.editor-polished .editor-preview.is-updating > img { opacity: 0.72; }
+.edit-preview-caption { position: absolute; bottom: 30px; left: 28px; font-size: 11px; color: #bfc1c5; letter-spacing: 0.1px; }
+.editor-polished .edit-compare {
+  min-height: 36px;
+  padding: 8px 16px;
+  bottom: 22px;
+  color: #f6f6f7;
+  background: rgba(61, 62, 66, 0.76);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 22px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 3px 12px #0002;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+.editor-polished .edit-compare[aria-pressed=true] { background: rgba(106, 107, 111, 0.76); }
+.editor-polished .edit-updating {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  top: 18px;
+  left: 20px;
+  padding: 7px 11px;
+  font-size: 11px;
+  border-radius: 20px;
+  background: rgba(38, 39, 42, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #e8e8ea;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+.editor-polished .edit-updating .side-spinner { border-color: #ffffff35; border-top-color: #eee; }
+.editor-polished .edit-controls { padding: 24px 20px 20px; gap: 22px; background: var(--surface); border-left: 1px solid var(--line); }
+.edit-inspector-heading { display: grid; gap: 5px; }
+.editor-polished h3 { font-size: 12px; text-transform: none; letter-spacing: 0; color: var(--text); font-weight: 600; margin: 0; }
+.edit-inspector-heading p { font-size: 11px; color: var(--muted); line-height: 1.5; }
+.edit-mode-switch { display: flex; padding: 3px; gap: 3px; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--line); }
+.edit-mode-switch button { min-width: 0; flex: 1; justify-content: center; border: 0; background: transparent; color: var(--muted); border-radius: 9px; padding: 7px 8px; min-height: 32px; position: relative; font-size: 12px; }
+.edit-mode-switch button.on { background: var(--surface); color: var(--text); box-shadow: 0 1px 4px #00000012; }
+.edit-change-dot { height: 4px; width: 4px; border-radius: 50%; background: currentColor; position: absolute; right: 8px; top: 8px; }
+.edit-panel { display: flex; flex-direction: column; gap: 24px; }
+.editor-polished .edit-tool-section { display: flex; flex-direction: column; gap: 16px; }
+.edit-section-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.edit-section-title > span, .edit-section-title > output { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.editor-polished .edit-buttons { gap: 7px; }
+.editor-polished .edit-buttons button { border-radius: 9px; min-height: 34px; padding: 7px 11px; justify-content: center; font-size: 12px; background: var(--surface-2); border: 1px solid transparent; }
+.editor-polished .edit-buttons button[aria-pressed=true] { border-color: var(--text); background: var(--surface); color: var(--text); box-shadow: 0 1px 3px #0000000a; }
+.edit-orientation { display: grid; grid-template-columns: 1fr 1fr; }
+.edit-orientation > button { flex-direction: column; gap: 6px; min-height: 62px !important; }
+.edit-orientation > button > span { font-size: 24px; line-height: 1; }
+.editor-polished .edit-aspects { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.editor-polished .edit-aspects button { padding: 9px 6px; }
+.edit-fine-crop { border-top: 1px solid var(--line); padding-top: 15px; }
+.edit-fine-crop summary { display: flex; justify-content: space-between; align-items: center; color: var(--muted); cursor: pointer; list-style: none; font-size: 12px; min-height: 30px; }
+.edit-fine-crop summary::-webkit-details-marker { display: none; }
+.edit-fine-crop summary > span { font-size: 18px; font-weight: 300; }
+.edit-fine-crop[open] summary { margin-bottom: 17px; }
+.edit-fine-crop[open] summary > span { transform: rotate(45deg); }
+.edit-fine-crop > div { display: grid; gap: 20px; }
+.editor-polished .edit-slider { gap: 9px; }
+.editor-polished .edit-slider > span { font-size: 12px; align-items: baseline; gap: 8px; }
+.editor-polished .edit-slider output { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.editor-polished .edit-slider input { height: 18px; margin: 0; accent-color: var(--text); cursor: pointer; }
+.edit-adjustments { gap: 27px !important; }
+.edit-time-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.editor-polished .edit-number { flex-direction: column; align-items: stretch; gap: 7px; font-size: 11px; color: var(--muted); }
+.edit-number > span { display: flex; align-items: center; gap: 6px; min-width: 0; background: var(--surface-2); border: 1px solid var(--line); border-radius: 9px; padding: 4px 9px; }
+.editor-polished .edit-number input { width: 100%; min-width: 0; border: 0; padding: 5px 0; background: transparent; border-radius: 0; font-size: 13px; font-variant-numeric: tabular-nums; }
+.edit-number > span > span { font-size: 11px; }
+.edit-trim-sliders { display: grid; gap: 18px; }
+.edit-mute { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding-top: 18px; border-top: 1px solid var(--line); font-size: 12px; cursor: pointer; }
+.edit-mute > span { display: flex; flex-direction: column; gap: 4px; }
+.edit-mute .muted { font-size: 11px; }
+.edit-mute input { width: 16px; height: 16px; accent-color: var(--text); cursor: pointer; }
+.edit-help { font-size: 11px; line-height: 1.6; color: var(--muted); }
+.edit-inspector-footer { margin-top: auto; display: grid; gap: 12px; padding-top: 24px; }
+.edit-export-note { font-size: 10px; color: var(--muted); letter-spacing: 0.2px; text-align: center; }
+.editor-polished .edit-reset { min-height: 34px; justify-content: center; font-size: 12px; color: var(--muted); }
+.edit-error { font-size: 12px; color: var(--bad); line-height: 1.5; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; }
+.vault-actions-polished { flex-wrap: nowrap; gap: 3px; }
+.vault-actions-polished > button { min-height: 34px; border-radius: 18px; padding: 7px 10px; font-size: 12px; gap: 6px; }
+.vault-actions-polished .vault-action-edit { background: var(--surface-2); color: var(--text); padding-inline: 13px; }
+.vault-actions-polished .vault-action-delete { color: var(--muted); }
+.vault-actions-polished .vault-action-delete:hover:not(:disabled) { color: var(--bad); }
+.vault-action-symbol { font-size: 19px; font-weight: 400; line-height: 1; }
+.vault-confirm-scrim { padding: 24px; background: #0005; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+.vault-confirm-dialog { width: min(100%, 430px); padding: 28px; border-radius: 22px; gap: 14px; border: 1px solid var(--glass-border, var(--line)); background: var(--glass, var(--surface)); box-shadow: var(--shadow); backdrop-filter: blur(32px); -webkit-backdrop-filter: blur(32px); }
+.vault-confirm-icon { display: grid; place-items: center; width: 48px; height: 48px; border: 1px solid var(--line); border-radius: 15px; background: var(--surface-2); color: var(--text); margin-bottom: 3px; }
+.vault-confirm-dialog h2 { font-size: 18px; font-weight: 600; letter-spacing: -0.3px; color: var(--text); }
+.vault-confirm-dialog > p { font-size: 13px; line-height: 1.65; color: var(--muted); }
+.vault-confirm-dialog .dialog-buttons { margin-top: 12px; gap: 8px; }
+.vault-confirm-dialog .dialog-buttons button { border-radius: 18px; min-height: 36px; justify-content: center; padding-inline: 14px; }
+.vault-confirm-dialog .destructive-action { background: var(--text); color: var(--bg); border-color: transparent; }
+@media (max-width: 1040px) {
+  .viewer .vault-actions-polished > button:not(.vault-action-edit) > span { display: none; }
+  .viewer .vault-actions-polished > button:not(.vault-action-edit) { width: 34px; padding: 7px; justify-content: center; }
+  .editor-polished .editor-body { grid-template-columns: minmax(0, 1fr) 280px; }
+  .editor-polished .edit-controls { padding: 20px 16px; }
+  .editor-polished .editor-preview { padding-inline: 20px; }
+  .edit-preview-caption { left: 18px; bottom: 68px; }
+}
+@media (max-height: 650px) {
+  .editor-polished .editor-bar { min-height: 62px; padding-block: 10px; }
+  .editor-polished .edit-controls { padding-block: 16px; }
+  .edit-inspector-heading { display: none; }
+  .editor-polished .edit-controls, .edit-panel { gap: 18px; }
+  .editor-polished .editor-preview { padding-top: 20px; padding-bottom: 65px; }
+  .editor-polished .edit-compare { bottom: 15px; }
+  .edit-inspector-footer { padding-top: 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .editor-polished .editor-preview > img, .editor-polished .editor-preview > video { transition: none; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .editor-polished .editor-bar, .vault-confirm-dialog { background: var(--surface); backdrop-filter: none; -webkit-backdrop-filter: none; }
+  .vault-confirm-scrim { backdrop-filter: none; -webkit-backdrop-filter: none; }
+  .editor-polished .edit-compare, .editor-polished .edit-updating { background: #292a2d; backdrop-filter: none; -webkit-backdrop-filter: none; }
+}
+@media (forced-colors: active) {
+  .editor-polished .edit-buttons button[aria-pressed=true], .edit-mode-switch button.on { border: 1px solid Highlight; }
+  .editor-polished .edit-save, .vault-confirm-dialog .destructive-action { border: 1px solid ButtonText; }
+}
