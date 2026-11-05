@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import type { SourceId, VaultDetails } from '../shared/api.ts'
-import { bytes, count } from './format.ts'
+import { sameVaultName, type SourceId, type VaultDetails } from '../shared/api.ts'
+import { bytes, cleanError, count } from './format.ts'
 import * as I from './icons.tsx'
+
+const cleanMessage = (e: unknown) => cleanError((e as Error).message)
 
 interface Props {
   id: SourceId
@@ -22,12 +24,16 @@ export function VaultDialog({ id, onClose, onGone, onError }: Props) {
   const [step, setStep] = useState<'info' | 'delete'>('info')
   const [typed, setTyped] = useState('')
   const [busy, setBusy] = useState(false)
+  /** Why the last remove or delete failed, shown in the dialog itself. */
+  const [failure, setFailure] = useState<string | null>(null)
+  /** The vault's size and location couldn't be read; deleting needs them. */
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
   const card = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     let live = true
-    window.photos.vaultDetails(id).then((x) => live && setD(x)).catch((e: Error) => onError(e.message))
+    window.photos.vaultDetails(id).then((x) => live && setD(x)).catch((e: Error) => live && setLoadError(cleanMessage(e)))
     return () => {
       live = false
     }
@@ -39,35 +45,48 @@ export function VaultDialog({ id, onClose, onGone, onError }: Props) {
 
   const remove = async () => {
     setBusy(true)
+    setFailure(null)
     try {
       await window.photos.closeVault(id)
       onGone(`${d?.name ?? 'The vault'} was removed from Theia. Its files are still in ${d?.root}.`)
     } catch (e) {
-      onError((e as Error).message)
+      setFailure(cleanMessage(e))
       setBusy(false)
     }
   }
   const destroy = async (mode: 'recycle' | 'permanent') => {
     setBusy(true)
+    setFailure(null)
     try {
       await window.photos.deleteVault(id, typed, mode)
       onGone(mode === 'recycle' ? `${d!.name} is in the Recycle Bin.` : `${d!.name} was deleted.`)
     } catch (e) {
-      onError((e as Error).message)
+      setFailure(cleanMessage(e))
       setBusy(false)
     }
   }
 
-  const nameOk = !!d && typed.trim() === d.name
+  const nameOk = !!d && sameVaultName(typed, d.name)
 
   return (
     <div
       className="modal-scrim"
       onMouseDown={(e) => e.target === e.currentTarget && !busy && onClose()}
-      onKeyDown={(e) => e.key === 'Escape' && !busy && (step === 'delete' ? setStep('info') : onClose())}
+      onKeyDown={(e) => e.key === 'Escape' && !busy && (step === 'delete' ? (setStep('info'), setFailure(null)) : onClose())}
     >
       <div className="confirm-dialog vault-dialog" ref={card} role="dialog" aria-modal="true" aria-labelledby="vault-dialog-title">
-        {!d ? (
+        {!d && loadError ? (
+          <>
+            <h2 id="vault-dialog-title">Can't delete this vault from Theia</h2>
+            <p className="vault-warn" role="alert">{loadError}</p>
+            <p className="muted small">You can still remove it from Theia. Its folder and files stay where they are.</p>
+            {failure && <p className="vault-warn" role="alert">{failure}</p>}
+            <div className="dialog-buttons">
+              <button className="ghost" onClick={onClose} disabled={busy}>Close</button>
+              <button className="primary" onClick={() => void remove()} disabled={busy}>Remove from Theia</button>
+            </div>
+          </>
+        ) : !d ? (
           <p className="muted">Reading the vault…</p>
         ) : step === 'info' ? (
           <>
@@ -125,6 +144,7 @@ export function VaultDialog({ id, onClose, onGone, onError }: Props) {
                 Delete…
               </button>
             </div>
+            {failure && <p className="vault-warn" role="alert">{failure}</p>}
             <div className="dialog-buttons">
               <button className="primary" onClick={onClose} disabled={busy}>
                 Done
@@ -150,10 +170,13 @@ export function VaultDialog({ id, onClose, onGone, onError }: Props) {
               <span>
                 Type <b>{d.name}</b> to confirm
               </span>
-              <input value={typed} onChange={(e) => setTyped(e.target.value)} spellCheck={false} autoComplete="off" disabled={busy} />
+              <input value={typed} onChange={(e) => setTyped(e.target.value)} spellCheck={false} autoComplete="off" disabled={busy}
+                onKeyDown={(e) => { if (e.key === 'Enter' && nameOk && !busy) void destroy(d.fitsRecycleBin === true ? 'recycle' : 'permanent') }} />
             </label>
+            {failure && <p className="vault-warn" role="alert">Could not delete it. {failure}</p>}
+            {busy && <p className="muted small" role="status">Finishing this vault's thumbnails, then deleting…</p>}
             <div className="dialog-buttons">
-              <button className="ghost" onClick={() => setStep('info')} disabled={busy}>
+              <button className="ghost" onClick={() => { setStep('info'); setFailure(null) }} disabled={busy}>
                 Back
               </button>
               {d.fitsRecycleBin === true ? (

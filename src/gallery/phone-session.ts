@@ -95,33 +95,45 @@ export class PhoneSession {
   /** Copy the Photos database and list /DCIM. A few seconds for thousands of photos. */
   async load(): Promise<void> {
     fs.mkdirSync(this.dir, { recursive: true })
-    const dbDir = path.join(this.dir, 'db')
-    fs.rmSync(dbDir, { recursive: true, force: true })
-    fs.mkdirSync(dbDir, { recursive: true })
+    // The copy in use stays open, and Windows refuses to delete an open file.
+    // Each load gets a fresh folder; older ones go once nothing holds them.
+    const dbDir = fs.mkdtempSync(path.join(this.dir, 'db-'))
     const local = path.join(dbDir, 'Photos.sqlite')
-    // The -wal holds recent changes not yet folded into the main file. Without
-    // it, the newest photos would be missing.
-    for (const suffix of ['', '-wal', '-shm']) {
-      const got = await this.copyFrom(`${PHOTOS_DB}${suffix}`, `${local}${suffix}`)
-      if (!got && suffix === '') throw new Error('could not read the Photos database from the phone')
-    }
+    let next: Database.Database | null = null
+    try {
+      // The -wal holds recent changes not yet folded into the main file. Without
+      // it, the newest photos would be missing.
+      for (const suffix of ['', '-wal', '-shm']) {
+        const got = await this.copyFrom(`${PHOTOS_DB}${suffix}`, `${local}${suffix}`)
+        if (!got && suffix === '') throw new Error('could not read the Photos database from the phone')
+      }
 
-    this.dcim.clear()
-    for (const album of await this.io((d) => d.list('/DCIM'))) {
-      if (album.startsWith('.')) continue
-      const dir = `/DCIM/${album}`
-      this.dcim.set(dir, await this.io((d) => d.list(dir)))
-    }
+      const dcim = new Map<string, string[]>()
+      for (const album of await this.io((d) => d.list('/DCIM'))) {
+        if (album.startsWith('.')) continue
+        const dir = `/DCIM/${album}`
+        dcim.set(dir, await this.io((d) => d.list(dir)))
+      }
 
-    this.library = readPhoneLibrary(local, (p) => this.onPhone(p))
-    this.db?.close()
-    this.db = new Database(local, { readonly: true, fileMustExist: true })
+      const library = readPhoneLibrary(local, (p) => onDcim(dcim, p))
+      next = new Database(local, { readonly: true, fileMustExist: true })
+      this.dcim = dcim
+      this.library = library
+    } catch (e) {
+      next?.close()
+      removeQuietly(dbDir)
+      throw e
+    }
+    const previous = this.db
+    this.db = next
+    previous?.close()
+    for (const entry of fs.readdirSync(this.dir)) {
+      if (/^db(-.+)?$/.test(entry) && entry !== path.basename(dbDir)) removeQuietly(path.join(this.dir, entry))
+    }
   }
 
   onPhone(devicePath: string): boolean {
-    const dir = path.posix.dirname(devicePath)
-    const name = path.posix.basename(devicePath).toLowerCase()
-    return (this.dcim.get(dir) ?? []).some((n) => n.toLowerCase() === name)
+    return onDcim(this.dcim, devicePath)
   }
 
   collections(): Collections {
@@ -583,6 +595,21 @@ export function isConnectionLost(e: unknown): boolean {
   return /ended by the other party|stream was destroyed|stream ended|ECONNRESET|EPIPE|socket hang up|service not connected/i.test(
     (e as Error)?.message ?? '',
   )
+}
+
+function onDcim(dcim: Map<string, string[]>, devicePath: string): boolean {
+  const dir = path.posix.dirname(devicePath)
+  const name = path.posix.basename(devicePath).toLowerCase()
+  return (dcim.get(dir) ?? []).some((n) => n.toLowerCase() === name)
+}
+
+/** A cache folder another session still holds open goes on a later load. */
+function removeQuietly(dir: string) {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true })
+  } catch {
+    // Still open somewhere (Windows). Harmless: it is only a cache.
+  }
 }
 
 function isNotFound(e: unknown): boolean {

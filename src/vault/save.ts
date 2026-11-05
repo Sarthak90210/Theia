@@ -26,7 +26,9 @@ export type { SaveProgress } from './save-progress.ts'
  * Every other album it is in gets a hard link, which takes no extra space.
  *
  * Saving the same thing twice is a no-op: items are recognised by the phone's
- * identifier, and files by their bytes.
+ * identifier, and files by their bytes. With `duplicates: 'replace'`, an item
+ * already there is saved again and the old copy goes, through `replace`, once
+ * the new files have been verified.
  */
 
 export interface SaveFile {
@@ -75,6 +77,8 @@ export interface SaveAlbum {
 export interface SaveResult {
   saved: number
   alreadyThere: number
+  /** Saved again over a copy that was already there (counted in `saved` too). */
+  replaced: number
   skippedCloud: number
   failed: { item: string; file: string; reason: string }[]
   bytes: number
@@ -95,7 +99,17 @@ export interface SaveOptions {
   maxAttempts?: number
   retryBaseMs?: number
   now?: () => number
+  /** Items already in the vault: leave them (default), or save them again. */
+  duplicates?: DuplicateChoice
+  /**
+   * Take the old copy of an item being replaced out of the vault: its files
+   * and its rows. Throw to keep it; the item then counts as failed. Called
+   * only after the new copy's files are verified.
+   */
+  replace?: (assetId: number) => Promise<void>
 }
+
+export type DuplicateChoice = 'skip' | 'replace'
 
 export class SaveCancelled extends Error {
   constructor() {
@@ -112,12 +126,14 @@ export async function saveToVault(
 ): Promise<SaveResult> {
   const { db, layout } = vault
   const now = opts.now ?? Date.now
-  const result: SaveResult = { saved: 0, alreadyThere: 0, skippedCloud: 0, failed: [], bytes: 0, newAssets: [], assets: {} }
+  const result: SaveResult = { saved: 0, alreadyThere: 0, replaced: 0, skippedCloud: 0, failed: [], bytes: 0, newAssets: [], assets: {} }
   const keys = new Set(items.map((i) => i.key))
   const relevantAlbums = albums.filter((a) => a.keys.some((k) => keys.has(k)))
   const albumIds = new Map(relevantAlbums.map((a) => [a.uuid, ensureAlbum(db, layout.root, a, now())]))
+  const replacing = opts.duplicates === 'replace'
+  if (replacing && !opts.replace) throw new Error('Replacing needs a way to remove the old copy.')
   const progress = new SaveProgressTracker(items.map(item => ({ files: item.files,
-    skip: item.cloud || findExisting(db, item) !== null })), now, opts.onProgress)
+    skip: item.cloud || (!replacing && findExisting(db, item) !== null) })), now, opts.onProgress)
 
   try {
   for (const [index, item] of items.entries()) {
@@ -129,7 +145,7 @@ export async function saveToVault(
       result.skippedCloud++
     } else {
       const existing = findExisting(db, item)
-      if (existing !== null) {
+      if (existing !== null && !replacing) {
         progress.skipItem(index)
         result.alreadyThere++
         result.assets[item.key] = existing
@@ -137,9 +153,10 @@ export async function saveToVault(
         linkAlbums(db, layout.media, existing, item.key, relevantAlbums, albumIds)
       } else {
         const outcome = await saveItem(vault, item, relevantAlbums, albumIds, opts,
-          fileIndex => progress.file(index, fileIndex), () => progress.finishing())
+          fileIndex => progress.file(index, fileIndex), () => progress.finishing(), existing)
         if (outcome.assetId !== null) {
           result.saved++
+          if (outcome.replaced) result.replaced++
           result.bytes += outcome.bytes
           result.newAssets.push(outcome.assetId)
           // Only an item with every file saved counts as saved for clean-up.
@@ -156,6 +173,17 @@ export async function saveToVault(
 }
 
 /* ----------------------------------------------------------------- items */
+
+/** Which of these items the vault already has: item key to vault asset. */
+export function existingInVault(db: Db, items: SaveItem[]): Map<string, number> {
+  const out = new Map<string, number>()
+  for (const item of items) {
+    if (item.cloud) continue
+    const id = findExisting(db, item)
+    if (id !== null) out.set(item.key, id)
+  }
+  return out
+}
 
 function findExisting(db: Db, item: SaveItem): number | null {
   if (item.sourceUuid) {
@@ -174,12 +202,13 @@ function findExisting(db: Db, item: SaveItem): number | null {
   return null
 }
 
-function matchingBurst(db: Db, hashes: string[]): { asset_id: number } | undefined {
+function matchingBurst(db: Db, hashes: string[], except: number): { asset_id: number } | undefined {
   const candidates = db.prepare(`SELECT DISTINCT a.id AS asset_id FROM asset a JOIN file f ON f.asset_id = a.id
     WHERE a.kind = 'burst' AND a.deleted_at IS NULL AND f.role = 'master' AND f.sha256 = ?`).all(hashes[0]) as { asset_id: number }[]
   const originals = db.prepare(`SELECT sha256 FROM file WHERE asset_id = ? AND role = 'master' ORDER BY sha256`)
   const wanted = [...hashes].sort()
   return candidates.find(({ asset_id }) => {
+    if (asset_id === except) return false
     const existing = originals.all(asset_id) as { sha256: string }[]
     return existing.length === wanted.length && existing.every((f, i) => f.sha256 === wanted[i])
   })
@@ -193,7 +222,9 @@ async function saveItem(
   opts: SaveOptions,
   fileProgress: (index: number) => SaveFileProgress,
   finishing: () => void,
-): Promise<{ assetId: number | null; bytes: number; failed: SaveResult['failed'] }> {
+  /** The copy already in the vault that this one replaces. */
+  replacing: number | null = null,
+): Promise<{ assetId: number | null; bytes: number; failed: SaveResult['failed']; replaced?: boolean }> {
   const { db, layout } = vault
   const now = opts.now ?? Date.now
   const home = albums.find((a) => a.keys.includes(item.key))
@@ -233,15 +264,42 @@ async function saveItem(
   // A frame's bytes cannot identify an entire burst. Compare all originals,
   // and keep standalone photos separate from the burst that contains them.
   const hashes = staged.filter(s => s.file.role === 'master').map(s => s.sha)
+  // The copy being replaced most likely has the same bytes; that one doesn't count.
+  const except = replacing ?? -1
   const dup = (item.kind === 'burst'
-    ? matchingBurst(db, hashes)
-    : db.prepare(`SELECT f.asset_id FROM file f JOIN asset a ON a.id = f.asset_id WHERE f.sha256 = ? AND a.kind <> 'burst' AND a.deleted_at IS NULL LIMIT 1`).get(master.sha)) as
+    ? matchingBurst(db, hashes, except)
+    : db.prepare(`SELECT f.asset_id FROM file f JOIN asset a ON a.id = f.asset_id WHERE f.sha256 = ? AND a.kind <> 'burst' AND a.deleted_at IS NULL AND a.id <> ? LIMIT 1`).get(master.sha, except)) as
     | { asset_id: number }
     | undefined
   if (dup) {
     for (const s of staged) fs.rmSync(s.tmp, { force: true })
     linkAlbums(db, layout.media, dup.asset_id, item.key, albums, albumIds)
     return { assetId: null, bytes: 0, failed }
+  }
+
+  // What the vault added to the old copy stays with the new one: its albums
+  // and whether it was hidden. The old copy goes before the new files take
+  // their names, so the new copy keeps the original file names.
+  let carried: { hidden: boolean; albums: { album_id: number; position: number; folder: string | null }[] } | null = null
+  if (replacing !== null && failed.length) {
+    // A partial new copy never pushes out a whole old one.
+    for (const s of staged) fs.rmSync(s.tmp, { force: true })
+    return { assetId: null, bytes: 0, failed: failed.map(f => ({ ...f, reason: `${f.reason} Kept the copy already in the vault.` })) }
+  }
+  if (replacing !== null) {
+    const old = db.prepare(`SELECT hidden FROM asset WHERE id = ?`).get(replacing) as { hidden: number } | undefined
+    carried = {
+      hidden: old?.hidden === 1,
+      albums: db.prepare(`SELECT x.album_id, x.position, al.folder FROM album_asset x JOIN album al ON al.id = x.album_id WHERE x.asset_id = ?`)
+        .all(replacing) as { album_id: number; position: number; folder: string | null }[],
+    }
+    try {
+      await opts.replace!(replacing)
+    } catch (e) {
+      for (const s of staged) fs.rmSync(s.tmp, { force: true })
+      failed.push({ item: item.key, file: master.file.name, reason: `Kept the copy already in the vault. Could not remove it: ${(e as Error).message}` })
+      return { assetId: null, bytes: 0, failed }
+    }
   }
 
   let bytes = 0
@@ -299,6 +357,7 @@ async function saveItem(
           now(),
         ).lastInsertRowid,
     )
+    if (carried?.hidden) db.prepare(`UPDATE asset SET hidden = 1 WHERE id = ?`).run(assetId)
     for (const p of placed) {
       if (p.s.file.role === 'sidecar') {
         db.prepare(`INSERT OR REPLACE INTO aae (asset_id, plist, editor) VALUES (?, ?, NULL)`).run(
@@ -325,7 +384,11 @@ async function saveItem(
   })()
 
   linkAlbums(db, layout.media, assetId, item.key, albums, albumIds)
-  return { assetId, bytes, failed }
+  for (const a of carried?.albums ?? []) {
+    db.prepare(`INSERT OR IGNORE INTO album_asset (album_id, asset_id, position) VALUES (?, ?, ?)`).run(a.album_id, assetId, a.position)
+    if (a.folder) linkInto(db, layout.media, assetId, a.folder)
+  }
+  return { assetId, bytes, failed, replaced: replacing !== null }
 }
 
 /* ---------------------------------------------------------------- albums */
@@ -370,19 +433,25 @@ function linkAlbums(
     if (pos < 0) continue
     const al = albumIds.get(a.uuid)!
     db.prepare(`INSERT OR IGNORE INTO album_asset (album_id, asset_id, position) VALUES (?, ?, ?)`).run(al.id, assetId, pos)
-    const folder = path.join(media, al.folder)
-    fs.mkdirSync(folder, { recursive: true })
-    for (const f of files) {
-      const src = path.join(media, ...f.path.split('/'))
-      if (path.dirname(src) === folder) continue
-      const dest = path.join(folder, path.basename(src))
-      if (fs.existsSync(dest)) continue
-      try {
-        fs.linkSync(src, dest)
-      } catch {
-        // exFAT and FAT have no hard links. A copy keeps the folder complete.
-        fs.copyFileSync(src, dest)
-      }
+    linkInto(db, media, assetId, al.folder, files)
+  }
+}
+
+/** A hard link (or a copy) of each of the asset's files in an album folder. */
+function linkInto(db: Db, media: string, assetId: number, albumFolder: string,
+  files = db.prepare(`SELECT path FROM file WHERE asset_id = ?`).all(assetId) as { path: string }[]) {
+  const folder = path.join(media, ...albumFolder.split('/'))
+  fs.mkdirSync(folder, { recursive: true })
+  for (const f of files) {
+    const src = path.join(media, ...f.path.split('/'))
+    if (path.dirname(src) === folder) continue
+    const dest = path.join(folder, path.basename(src))
+    if (fs.existsSync(dest)) continue
+    try {
+      fs.linkSync(src, dest)
+    } catch {
+      // exFAT and FAT have no hard links. A copy keeps the folder complete.
+      fs.copyFileSync(src, dest)
     }
   }
 }

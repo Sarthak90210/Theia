@@ -121,6 +121,20 @@ describe('phone session', () => {
     expect(await session.thumb('U1', 'lg')).toBeTruthy()
   })
 
+  it('reloads the Photos database while the previous copy is still open', async () => {
+    // Found on Windows: "Save and delete from iPhone" reloads before checking,
+    // and deleting the open copy failed with EPERM.
+    const fake = await phone(1)
+    const cacheRoot = path.join(s.dir, 'cache')
+    const session = await open({ device: fake, udid: 'U', name: 'Fake', cacheRoot, heic: noHeic })
+    expect(session.extras('U1')).not.toBeUndefined()
+    await session.load()
+    await session.load()
+    expect(session.library.assets.map((a) => a.key)).toEqual(['U1'])
+    const dbDirs = fs.readdirSync(path.join(cacheRoot, 'U')).filter((n) => n.startsWith('db'))
+    expect(dbDirs).toHaveLength(1)
+  })
+
   it('reconnects when the phone drops the connection, and carries on', async () => {
     const fake = await phone()
     const first = new Link(fake)

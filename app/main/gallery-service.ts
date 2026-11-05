@@ -13,11 +13,11 @@ import { renderThumbnails, thumbPath, type ThumbSize } from '../../src/thumbs/re
 import { queueThumbnails, runThumbnails, THUMBNAIL } from '../../src/thumbs/jobs.ts'
 import { PhoneSession, mimeOf } from '../../src/gallery/phone-session.ts'
 import { displayFile, vaultCollections, vaultDetail, vaultFiles, vaultItems } from '../../src/gallery/vault-gallery.ts'
-import { phoneSaveAlbums, phoneSaveItems, vaultSaveAlbums, vaultSaveItems } from '../../src/gallery/save-sources.ts'
+import { phoneProbeItems, phoneSaveAlbums, phoneSaveItems, vaultSaveAlbums, vaultSaveItems } from '../../src/gallery/save-sources.ts'
 import { backfillPlaceNames } from '../../src/gallery/place-backfill.ts'
 import type { Collections, GalleryItem, ItemDetail } from '../../src/gallery/types.ts'
 import { createVault, isVault, canCreateVault, openVault, NotAVault, type OpenVault } from '../../src/vault/vault.ts'
-import { saveToVault, SaveCancelled } from '../../src/vault/save.ts'
+import { existingInVault, saveToVault, SaveCancelled } from '../../src/vault/save.ts'
 import { purgeAssets, restoreAssets, trashAssets } from '../../src/vault/delete.ts'
 import { keepBurstFrame, setBurstCover } from '../../src/vault/burst.ts'
 import type { KeyObject } from 'node:crypto'
@@ -42,7 +42,7 @@ import { editPreview } from '../../src/media/edit.ts'
 import type { EditRecipe } from '../../src/media/edit-recipe.ts'
 import { convert, planFor, probe, storyboard as makeStoryboard, type Plan, type Probe } from '../../src/media/playback.ts'
 import type { ByteSource } from '../../src/media/ranges.ts'
-import type { AppState, SaveRequest, SaveState, SourceId, StoryboardInfo, VaultDetails, VaultInfo } from '../shared/api.ts'
+import { sameVaultName, type AppState, type SaveRequest, type SaveState, type SourceId, type StoryboardInfo, type VaultDetails, type VaultInfo } from '../shared/api.ts'
 import type { AppSettings } from '../shared/settings.ts'
 import { SettingsStore } from './settings.ts'
 import { folderBytes, validateVaultDeletion } from '../../src/vault/manage.ts'
@@ -113,6 +113,10 @@ export class GalleryService {
   private readonly probes = new Map<string, Probe>()
   private readonly placesChecked = new WeakMap<PhoneSession, WeakSet<OpenVault>>()
   private readonly savingVaults = new Set<SourceId>()
+  /** Vaults being closed: the thumbnail run leaves them alone. */
+  private readonly closingVaults = new Set<SourceId>()
+  /** The thumbnail drain working on a vault now, so closing it can stop just that one. */
+  private readonly thumbDrains = new Map<SourceId, { abort: AbortController; done: Promise<void> }>()
 
   constructor(private readonly deps: ServiceDeps) {
     this.settings = new SettingsStore(deps.userData)
@@ -653,9 +657,18 @@ export class GalleryService {
     if (!v) return
     if (this.editing.has(id)) throw new Error('Wait for the edited copy to finish saving before closing this vault.')
     if (this.savingVaults.has(id)) throw new Error('Wait for saving to finish before closing this vault.')
-    await v.privacy.catch(() => {})
-    await this.thumbnailRun?.catch(() => {})
-    await Promise.all([...this.rendering.entries()].filter(([key]) => key.startsWith(`${id}:`)).map(([,job]) => job.catch(() => {})))
+    // Stop this vault's thumbnails and wait for the few in flight, not for
+    // every other vault's queue: a big library can take an hour to finish.
+    this.closingVaults.add(id)
+    try {
+      const drain = this.thumbDrains.get(id)
+      drain?.abort.abort()
+      await drain?.done.catch(() => {})
+      await v.privacy.catch(() => {})
+      await Promise.all([...this.rendering.entries()].filter(([key]) => key.startsWith(`${id}:`)).map(([,job]) => job.catch(() => {})))
+    } finally {
+      this.closingVaults.delete(id)
+    }
     this.lockVault(id)
     v.vault.db.close()
     this.vaults.delete(id)
@@ -685,7 +698,7 @@ export class GalleryService {
     const v = this.vaults.get(id)
     if (!v) throw new Error('That vault is not open.')
     const name = v.vault.manifest.name
-    if (confirmName.trim() !== name) throw new Error(`Type the vault's name, ${name}, to delete it.`)
+    if (!sameVaultName(confirmName, name)) throw new Error(`Type the vault's name, ${name}, to delete it.`)
     if (!['recycle', 'permanent'].includes(mode)) throw new Error('Choose how to delete this vault.')
     if (this.editing.has(id) || this.savingVaults.has(id)) {
       throw new Error('Wait for the save into this vault to finish first.')
@@ -700,12 +713,26 @@ export class GalleryService {
     }
     // Let go of it first: the database file is open while the vault is.
     await this.closeVault(id)
-    validateVaultDeletion(v.vault, [...this.vaults.values()].map(other => other.vault.layout.root), [this.deps.userData])
-    if (mode === 'recycle') {
-      await this.deps.trash(root)
-      if (fs.existsSync(root)) throw new Error(`Windows did not move ${root} to the Recycle Bin. Nothing was deleted.`)
-    } else {
-      fs.rmSync(root, { recursive: true, force: true })
+    try {
+      validateVaultDeletion(v.vault, [...this.vaults.values()].map(other => other.vault.layout.root), [this.deps.userData])
+      if (mode === 'recycle') {
+        await this.deps.trash(root)
+        if (fs.existsSync(root)) throw new Error(`Windows did not move ${root} to the Recycle Bin. Nothing was deleted.`)
+      } else {
+        fs.rmSync(root, { recursive: true, force: true })
+      }
+    } catch (e) {
+      // Still there: open it again, so it doesn't vanish from Theia while its files stay.
+      if (isVault(root)) {
+        try {
+          this.addVault(root)
+          this.saveVaultList()
+        } catch (again) {
+          console.error(`could not reopen ${root}:`, (again as Error).message)
+        }
+      }
+      this.publish(true)
+      throw e
     }
     this.publish(true)
   }
@@ -794,6 +821,18 @@ export class GalleryService {
 
   /* ------------------------------------------------------------------ save */
 
+  /** How many of the items the target vault already has, so the window can ask: skip or replace. */
+  countDuplicates(req: SaveRequest): number {
+    if (!('vault' in req.target)) return 0
+    const target = this.vaults.get(req.target.vault)
+    if (!target || target.id === req.source) return 0
+    const fromVault = this.vaults.get(req.source)
+    const items = fromVault
+      ? vaultSaveItems(fromVault.vault.db, fromVault.vault.layout.media, req.keys)
+      : phoneProbeItems(this.phone(req.source), req.keys, req.framesOnly)
+    return existingInVault(target.vault.db, items).size
+  }
+
   async saveItems(req: SaveRequest) {
     if (this.save.status === 'running') return
     if (req.deleteAfterSave && (!req.source.startsWith('device:') || req.framesOnly)) throw new Error('Delete after save is available only for complete iPhone items, not individual burst frames or vault copies.')
@@ -847,14 +886,28 @@ export class GalleryService {
         items = await phoneSaveItems(s, device, req.keys, req.framesOnly)
         albums = phoneSaveAlbums(s)
       }
-      const result = await saveToVault(target.vault, items, albums, {
+      const vault = target.vault
+      const result = await saveToVault(vault, items, albums, {
         signal: abort.signal,
         metadata: this.metadata,
+        duplicates: req.duplicates,
+        // The old copy goes to the Windows Recycle Bin, every file of it, so a
+        // replace can still be undone outside the app.
+        replace: async (id) => {
+          trashAssets(vault.db, [id])
+          const r = await purgeAssets(vault.db, vault.layout.media, [id], this.deps.trash, privateDir(vault.layout))
+          if (!r.removed) {
+            restoreAssets(vault.db, [id])
+            throw new Error(r.failed[0]?.reason ?? 'it could not go to the Recycle Bin')
+          }
+        },
         onProgress: (p) => {
           this.save = { status: 'running', target: name, ...p }
           this.publish()
         },
       })
+      // A replaced hidden item stays hidden; its new copy is encrypted like the old one was.
+      if (result.replaced) await this.applyPrivacy(target).catch((e) => console.warn('privacy after replace:', (e as Error).message))
       let cleanup: Extract<SaveState,{status:'done'}>['cleanup']
       if (req.deleteAfterSave && phoneSession && device) {
         const session = phoneSession
@@ -1195,26 +1248,35 @@ export class GalleryService {
     try {
       for (; !this.stopping;) {
         const pending = [...this.vaults.values()].filter((v) => {
+          if (this.closingVaults.has(v.id)) return false
           v.queue.recover(THUMBNAIL)
           queueThumbnails(v.vault.db, v.queue, v.vault.layout.cache)
           return v.queue.counts(THUMBNAIL).queued > 0
         })
         if (!pending.length) break
         for (const v of pending) {
-          if (!this.vaults.has(v.id)) continue
+          if (!this.vaults.has(v.id) || this.closingVaults.has(v.id)) continue
           const c = v.queue.counts(THUMBNAIL)
           const base = c.done
           const total = c.done + c.queued
           this.thumbs = { done: base, total }
           this.publish()
-          await runThumbnails(v.vault.db, v.queue, v.vault.layout.media, v.vault.layout.cache, { heic: this.heic }, {
+          const abort = new AbortController()
+          const done = runThumbnails(v.vault.db, v.queue, v.vault.layout.media, v.vault.layout.cache, { heic: this.heic }, {
             concurrency: this.heic.size + 1,
+            signal: abort.signal,
             onSettled: () => {
               if (!this.vaults.has(v.id)) return
               this.thumbs = { done: v.queue.counts(THUMBNAIL).done, total }
               this.publish()
             },
           })
+          this.thumbDrains.set(v.id, { abort, done })
+          try {
+            await done
+          } finally {
+            this.thumbDrains.delete(v.id)
+          }
         }
       }
     } catch (e) {

@@ -64,6 +64,8 @@ export type SaveState =
       target: string
       saved: number
       alreadyThere: number
+      /** Saved again over the copy already there (also counted in saved). */
+      replaced?: number
       skippedCloud: number
       failed: { item: string; file: string; reason: string }[]
       cancelled: boolean
@@ -114,6 +116,15 @@ export interface VaultDetails {
   recycleBinMax: number | null
 }
 
+/**
+ * The name typed to confirm deleting a vault. Case and surrounding spaces
+ * don't matter: it confirms intent, it isn't a password.
+ */
+export function sameVaultName(typed: string, name: string): boolean {
+  const norm = (s: string) => s.normalize('NFC').trim().replace(/\s+/g, ' ').toLocaleLowerCase()
+  return norm(typed) !== '' && norm(typed) === norm(name)
+}
+
 export type SaveTarget = { vault: SourceId } | { newVault: true }
 
 export interface SaveRequest {
@@ -125,6 +136,8 @@ export interface SaveRequest {
   /** Items to save, by key. */
   keys: string[]
   target: SaveTarget
+  /** Items the vault already has: leave them (default), or save them again over the old copy. */
+  duplicates?: 'skip' | 'replace'
 }
 
 /** What the window may ask for. */
@@ -171,6 +184,8 @@ export interface PhotosApi {
   deleteVault(id: SourceId, confirmName: string, mode: 'recycle' | 'permanent'): Promise<void>
 
   save(request: SaveRequest): Promise<void>
+  /** How many of these items the target vault already has. 0 for a new vault. */
+  countDuplicates(request: SaveRequest): Promise<number>
   cancelSave(): Promise<void>
   dismissSave(): Promise<void>
 
@@ -219,6 +234,7 @@ export const INVOKE_CHANNELS = [
   'revealVault',
   'deleteVault',
   'save',
+  'countDuplicates',
   'cancelSave',
   'dismissSave',
   'remove',

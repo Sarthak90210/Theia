@@ -18,7 +18,8 @@ export interface SaveMenuProps {
 export function SaveMenu({ state, source, keys, label, primary, framesOnly, onError }: SaveMenuProps) {
   const [open, setOpen] = useState(false)
   const [deleteAfterSave, setDeleteAfterSave] = useState(false)
-  const [pending, setPending] = useState<SaveRequest | null>(null)
+  /** A save waiting on an answer: what to do with items already there, then whether to delete from iPhone. */
+  const [pending, setPending] = useState<{ request: SaveRequest; ask: 'duplicates' | 'delete'; duplicates: number } | null>(null)
   const dialog = useRef<HTMLDivElement>(null)
   const title = useId()
   const box = useRef<HTMLDivElement>(null)
@@ -57,14 +58,35 @@ export function SaveMenu({ state, source, keys, label, primary, framesOnly, onEr
     }
   }, [open])
 
-  const go = (target: { vault: SourceId } | { newVault: true }) => {
+  const start = (request: SaveRequest) => {
+    setPending(null)
+    trigger.current?.focus()
+    void window.photos.save(request).catch((e: Error) => onError(e.message))
+  }
+
+  /** After the duplicates question: the deletion warning when asked for, then the save. */
+  const proceed = (request: SaveRequest) => {
+    if (request.deleteAfterSave) setPending({ request, ask: 'delete', duplicates: 0 })
+    else start(request)
+  }
+
+  const go = async (target: { vault: SourceId } | { newVault: true }) => {
     setOpen(false)
     trigger.current?.focus()
-    const request = { source, keys: [...keys], target, framesOnly, deleteAfterSave: phone && !framesOnly && deleteAfterSave }
+    const request: SaveRequest = { source, keys: [...keys], target, framesOnly, deleteAfterSave: phone && !framesOnly && deleteAfterSave }
     setDeleteAfterSave(false)
-    if (request.deleteAfterSave) setPending(request)
-    else window.photos.save(request).catch((e: Error) => onError(e.message))
+    let duplicates = 0
+    if ('vault' in target) {
+      try { duplicates = await window.photos.countDuplicates(request) } catch { duplicates = 0 }
+    }
+    if (duplicates > 0) setPending({ request, ask: 'duplicates', duplicates })
+    else proceed(request)
   }
+
+  const cancelPending = () => { setPending(null); trigger.current?.focus() }
+  const targetName = pending && 'vault' in pending.request.target
+    ? state.vaults.find((v) => 'vault' in pending.request.target && v.id === pending.request.target.vault)?.name ?? 'this vault'
+    : 'this vault'
 
   return (
     <><div className="menu-anchor" ref={box}>
@@ -88,14 +110,14 @@ export function SaveMenu({ state, source, keys, label, primary, framesOnly, onEr
             <span>Delete from iPhone after verified save</span>
           </label>}
           {targets.map((v) => (
-            <button key={v.id} role="menuitem" className="menu-item" onClick={() => go({ vault: v.id })}>
+            <button key={v.id} role="menuitem" className="menu-item" onClick={() => void go({ vault: v.id })}>
               <I.Vault size={16} />
               <span>{v.name}</span>
               <span className="muted small">{count(v.count)}</span>
             </button>
           ))}
           {targets.length > 0 && <div className="menu-line" />}
-          <button role="menuitem" className="menu-item" onClick={() => go({ newVault: true })}>
+          <button role="menuitem" className="menu-item" onClick={() => void go({ newVault: true })}>
             <I.Plus size={16} />
             <span>New vault…</span>
           </button>
@@ -104,7 +126,7 @@ export function SaveMenu({ state, source, keys, label, primary, framesOnly, onEr
     </div>
     {pending && createPortal(<div className="modal-scrim" onKeyDown={e => {
       e.stopPropagation()
-      if (e.key === 'Escape') { setPending(null); trigger.current?.focus() }
+      if (e.key === 'Escape') cancelPending()
       if (e.key === 'Tab') {
         const buttons = dialog.current?.querySelectorAll<HTMLButtonElement>('button')
         const first = buttons?.[0], last = buttons?.[buttons.length - 1]
@@ -112,12 +134,24 @@ export function SaveMenu({ state, source, keys, label, primary, framesOnly, onEr
         else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus() }
       }
     }}><div className="confirm-dialog protect-dialog" ref={dialog} role="alertdialog" aria-modal="true" aria-labelledby={title}>
-      <h2 id={title}>Save and delete from iPhone?</h2>
-      <p>Save {plural(pending.keys.length, 'item')}, then verify every original, edit and companion file. Items that fail a check stay on your iPhone.</p>
-      <p>Verification rereads the saved copies and the iPhone originals, checks that the saved files open, and checks the Windows device copy again before deleting. This takes longer than saving alone.</p>
-      <p className="vault-warn">Windows may delete permanently. Deleting can also affect iCloud Photos and other synced devices.</p>
-      <div className="dialog-buttons"><button className="ghost" onClick={() => { setPending(null); trigger.current?.focus() }}>Cancel</button>
-      <button className="primary" onClick={() => { const request = pending; setPending(null); trigger.current?.focus(); void window.photos.save(request).catch((e: Error) => onError(e.message)) }}>Save, verify, then delete</button></div>
+      {pending.ask === 'duplicates' ? <>
+        <h2 id={title}>{pending.duplicates === pending.request.keys.length
+          ? `${pending.duplicates === 1 ? 'This item is' : 'These items are'} already in ${targetName}`
+          : `${count(pending.duplicates)} of ${plural(pending.request.keys.length, 'item')} already in ${targetName}`}</h2>
+        <p><b>Skip</b> leaves the copies already there and saves only what is new.</p>
+        <p><b>Replace</b> saves fresh copies and sends the old ones to the Windows Recycle Bin. Albums and Hidden carry over to the new copies.</p>
+        {pending.request.deleteAfterSave && <p className="muted small">Either way, items confirmed in the vault can then be deleted from iPhone.</p>}
+        <div className="dialog-buttons"><button className="ghost" onClick={cancelPending}>Cancel</button>
+        <button className="ghost" onClick={() => proceed({ ...pending.request, duplicates: 'replace' })}>Replace</button>
+        <button className="primary" onClick={() => proceed({ ...pending.request, duplicates: 'skip' })}>Skip</button></div>
+      </> : <>
+        <h2 id={title}>Save and delete from iPhone?</h2>
+        <p>Save {plural(pending.request.keys.length, 'item')}, then verify every original, edit and companion file. Items that fail a check stay on your iPhone.</p>
+        <p>Verification rereads the saved copies and the iPhone originals, checks that the saved files open, and checks the Windows device copy again before deleting. This takes longer than saving alone.</p>
+        <p className="vault-warn">Windows may delete permanently. Deleting can also affect iCloud Photos and other synced devices.</p>
+        <div className="dialog-buttons"><button className="ghost" onClick={cancelPending}>Cancel</button>
+        <button className="primary" onClick={() => start(pending.request)}>Save, verify, then delete</button></div>
+      </>}
     </div></div>, document.body)}</>
   )
 }
@@ -205,6 +239,7 @@ function savePercent(s: Extract<AppState['save'], { status: 'running' }>): numbe
 
 function doneText(s: Extract<AppState['save'], { status: 'done' }>): string {
   const parts = [`${s.cancelled ? 'Stopped. ' : ''}Saved ${count(s.saved)} into ${s.target}`]
+  if (s.replaced) parts.push(`${count(s.replaced)} replaced the copy already there`)
   if (s.alreadyThere) parts.push(`${count(s.alreadyThere)} ${s.alreadyThere === 1 ? 'was' : 'were'} already there`)
   if (s.skippedCloud) parts.push(`${plural(s.skippedCloud, 'item')} only in iCloud ${s.skippedCloud === 1 ? 'was' : 'were'} skipped`)
   if (s.failed.length) parts.push(`${count(s.failed.length)} failed`)

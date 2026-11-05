@@ -1,11 +1,17 @@
 {
   "name": "theia",
   "productName": "Theia",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A Windows photo library and iPhone import app",
-  "author": { "name": "Sarthak90210", "url": "https://github.com/Sarthak90210" },
+  "author": {
+    "name": "Sarthak90210",
+    "url": "https://github.com/Sarthak90210"
+  },
   "license": "UNLICENSED",
-  "repository": { "type": "git", "url": "https://github.com/Sarthak90210/Theia.git" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Sarthak90210/Theia.git"
+  },
   "private": true,
   "type": "module",
   "scripts": {

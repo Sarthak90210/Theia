@@ -3,7 +3,8 @@ import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { canCreateVault, createVault, folderNameFor, isVault, NotAVault, openVault, vaultLayout } from '../src/vault/vault.ts'
-import { saveToVault, type SaveAlbum, type SaveFile, type SaveItem } from '../src/vault/save.ts'
+import { existingInVault, saveToVault, type SaveAlbum, type SaveFile, type SaveItem } from '../src/vault/save.ts'
+import { purgeAssets, trashAssets } from '../src/vault/delete.ts'
 import { vaultCollections, vaultDetail, vaultItems } from '../src/gallery/vault-gallery.ts'
 import { vaultSaveAlbums, vaultSaveItems } from '../src/gallery/save-sources.ts'
 import { makeHeic, makeVideo, scratch, type Scratch } from './helpers.ts'
@@ -161,6 +162,58 @@ describe('saving into a vault', () => {
     )
     expect(again).toMatchObject({ saved: 1, alreadyThere: 1 })
     expect(db(v).prepare(`SELECT COUNT(*) AS n FROM asset`).get()).toEqual({ n: 2 })
+    v.db.close()
+  })
+
+  it('tells which items the vault already has, before saving', async () => {
+    const v = createVault(path.join(base, 'V'))
+    await saveToVault(v, [item('a', [memFile('IMG_0001.HEIC', makeHeic())])], [])
+    const found = existingInVault(v.db, [item('a', []), item('b', []), item('c', [], { cloud: true, sourceUuid: 'uuid-a' })])
+    expect([...found.keys()]).toEqual(['a'])
+    v.db.close()
+  })
+
+  it('replaces what the vault already has when asked, keeping its albums and Hidden', async () => {
+    const v = createVault(path.join(base, 'V'))
+    const old = makeHeic({ mdatBytes: 1000 })
+    await saveToVault(v, [item('a', [memFile('IMG_0001.HEIC', old)])], [{ uuid: 'AL', name: 'Trip', keys: ['a'] }])
+    db(v).prepare(`UPDATE asset SET hidden = 1`).run()
+    const bin = path.join(base, 'bin')
+    fs.mkdirSync(bin)
+    const recycle = async (f: string) => fs.renameSync(f, path.join(bin, `${fs.readdirSync(bin).length}-${path.basename(f)}`))
+
+    const fresh = makeHeic({ mdatBytes: 2000 })
+    const r = await saveToVault(v, [item('a', [memFile('IMG_0001.HEIC', fresh)])], [], {
+      duplicates: 'replace',
+      replace: async (id) => {
+        trashAssets(v.db, [id])
+        await purgeAssets(v.db, v.layout.media, [id], recycle)
+      },
+    })
+
+    expect(r).toMatchObject({ saved: 1, replaced: 1, alreadyThere: 0, failed: [] })
+    expect(db(v).prepare(`SELECT COUNT(*) AS n, MAX(hidden) AS hidden FROM asset`).get()).toEqual({ n: 1, hidden: 1 })
+    expect(fs.readFileSync(path.join(v.layout.root, 'Library', 'IMG_0001.HEIC'))).toEqual(fresh)
+    expect(fs.readFileSync(path.join(v.layout.root, 'Trip', 'IMG_0001.HEIC'))).toEqual(fresh)
+    expect(vaultCollections(v.db).albums.map((x) => x.name)).toEqual(['Trip'])
+    expect(db(v).prepare(`SELECT COUNT(*) AS n FROM album_asset`).get()).toEqual({ n: 1 })
+    expect(fs.readdirSync(bin)).toHaveLength(1)
+    v.db.close()
+  })
+
+  it('keeps the old copy when it cannot be removed', async () => {
+    const v = createVault(path.join(base, 'V'))
+    const old = makeHeic({ mdatBytes: 1000 })
+    await saveToVault(v, [item('a', [memFile('IMG_0001.HEIC', old)])], [])
+    const r = await saveToVault(v, [item('a', [memFile('IMG_0001.HEIC', makeHeic({ mdatBytes: 2000 }))])], [], {
+      duplicates: 'replace',
+      replace: async () => { throw new Error('Recycle Bin refused') },
+    })
+    expect(r).toMatchObject({ saved: 0, replaced: 0 })
+    expect(r.failed[0]!.reason).toMatch(/Kept the copy already in the vault.*Recycle Bin refused/)
+    expect(r.assets).toEqual({})
+    expect(fs.readFileSync(path.join(v.layout.root, 'Library', 'IMG_0001.HEIC'))).toEqual(old)
+    expect(fs.readdirSync(path.join(v.layout.root, 'Library'))).toEqual(['IMG_0001.HEIC'])
     v.db.close()
   })
 

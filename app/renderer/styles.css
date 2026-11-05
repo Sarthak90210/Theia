@@ -896,7 +896,8 @@ button.link:hover {
   left: 50%;
   bottom: 48px;
   transform: translateX(-50%);
-  z-index: 30;
+  /* Above dialogs, so an error from one is not hidden behind it. */
+  z-index: 120;
   background: var(--surface);
   border: 1px solid var(--line);
   box-shadow: var(--shadow);

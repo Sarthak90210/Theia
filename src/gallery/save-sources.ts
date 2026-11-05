@@ -175,6 +175,24 @@ export async function phoneSaveItems(session: PhoneSession, device: DeviceSource
   return out
 }
 
+/**
+ * Enough of each phone item to tell whether a vault has it already, without
+ * touching the phone: identity only, no files.
+ */
+export function phoneProbeItems(session: PhoneSession, keys: string[], framesOnly = false): SaveItem[] {
+  const out: SaveItem[] = []
+  for (const key of keys) {
+    const a = session.asset(key)
+    if (!a) continue
+    const frame = framesOnly && a.kind === 'burst'
+    out.push({
+      key, kind: frame ? 'photo' : a.kind, t: a.t, off: a.off, w: a.w, h: a.h, dur: a.dur, fav: a.fav, edited: a.edited,
+      subtype: a.subtype, sourceUuid: frame ? `${a.key}:frame` : a.key, lat: a.lat, lon: a.lon, cloud: a.cloud, files: [],
+    })
+  }
+  return out
+}
+
 export function phoneSaveAlbums(session: PhoneSession): SaveAlbum[] {
   return session.library.albums.map((a) => ({ uuid: a.uuid, name: a.name, keys: a.keys }))
 }
