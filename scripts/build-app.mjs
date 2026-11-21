@@ -3,7 +3,9 @@
 //   main.cjs       main process: device, engine, database, jobs
 //   preload.cjs    the window's only bridge to the main process
 //   renderer/      the window: index.html, styles.css, app.js
-//   heic-worker.mjs  copied as is; worker threads load it by path
+//   heic-worker.mjs, embed-worker.mjs, ocr-worker.mjs, ocr-core.mjs,
+//   face-worker.mjs, face-core.mjs, cluster-core.mjs
+//                  copied as is; worker threads load them by path
 //
 // Native and heavy modules stay external and load from node_modules at run
 // time. better-sqlite3 13 and sharp are N-API, so the same binaries serve
@@ -24,7 +26,7 @@ fs.rmSync(out, { recursive: true, force: true })
 fs.mkdirSync(path.join(out, 'renderer'), { recursive: true })
 await prepareWpd(path.join(out, 'wpd'))
 
-const external = ['electron', 'better-sqlite3', 'sharp', 'exiftool-vendored', 'libheif-js']
+const external = ['electron', 'better-sqlite3', 'sharp', 'exiftool-vendored', 'libheif-js', '@huggingface/transformers', 'onnxruntime-node']
 
 // The source is ESM and uses import.meta.url to find the HEIC worker. In a
 // CommonJS bundle that does not exist, so point it at the bundle file itself,
@@ -82,5 +84,6 @@ for (const f of fs.readdirSync(path.join(root, 'app/renderer'))) {
 fs.copyFileSync(path.join(root, 'app/assets/theia-logo.png'), path.join(out, 'renderer/theia-logo.png'))
 fs.copyFileSync(path.join(root, 'app/assets/theia-logo.png'), path.join(out, 'theia-logo.png'))
 fs.copyFileSync(path.join(root, 'src/thumbs/heic-worker.mjs'), path.join(out, 'heic-worker.mjs'))
+for (const f of ['embed-worker.mjs', 'ocr-worker.mjs', 'ocr-core.mjs', 'face-worker.mjs', 'face-core.mjs', 'cluster-core.mjs']) fs.copyFileSync(path.join(root, 'src/search', f), path.join(out, f))
 
 console.log(`built ${path.relative(root, out)}`)

@@ -218,15 +218,7 @@ export function StatusBar({ state }: { state: AppState }) {
           {s.cleanup?.reasons.map((r, i) => <li key={`cleanup-${i}`}><span>{r.item}</span> <span className="muted">iPhone cleanup: {r.reason}</span></li>)}
         </ul>
       )}
-      {s.status === 'idle' && <span className="muted small">{t ? '' : 'Ready'}</span>}
-      {t && (
-        <span className="status-thumbs muted small">
-          Making thumbnails · {count(t.done)} of {count(t.total)}
-          <span className="bar small">
-            <span style={{ width: `${t.total ? (t.done / t.total) * 100 : 0}%` }} />
-          </span>
-        </span>
-      )}
+      <IndexingStatus state={state} />
     </footer>
   )
 }
@@ -245,4 +237,37 @@ function doneText(s: Extract<AppState['save'], { status: 'done' }>): string {
   if (s.failed.length) parts.push(`${count(s.failed.length)} failed`)
   if (s.cleanup) parts.push(`${s.cleanup.deleted} deleted from iPhone, ${s.cleanup.kept} kept or not confirmed deleted`)
   return parts.join(', ') + '.'
+}
+
+/**
+ * One bar for all of indexing, from the first thumbnail to the last group of
+ * faces, counting as it goes and gone only when there is nothing left to do:
+ * thumbnails, then reading every photo (search by meaning, text, faces), then
+ * grouping faces into people.
+ */
+function IndexingStatus({ state }: { state: AppState }) {
+  const t = state.thumbnails
+  const ix = state.search.indexing
+  const people = state.search.people
+  const steps = people ? 3 : 2
+  const gpu = state.search.devices.embed === 'gpu'
+  let step: { n: number; label: string; done: number; total: number; vault: string | null } | null = null
+  if (t) step = { n: 1, label: 'Making thumbnails', done: t.done, total: t.total, vault: null }
+  else if (ix?.step === 'reading') step = { n: 2, label: people ? 'Reading photos for search and people' : 'Reading photos for search', done: ix.done, total: ix.total, vault: ix.vault }
+  else if (ix?.step === 'people') step = { n: 3, label: 'Grouping people', done: ix.done, total: ix.total, vault: ix.vault }
+  if (!step) return null
+  const known = step.total > 0
+  const title = `Theia makes thumbnails, then reads each photo once so you can search by what it shows${people ? ', and finds the people in it' : ''}. `
+    + 'It runs in the background, picks up where it left off after a restart, and search works meanwhile.'
+    + (gpu ? ' Using the graphics card.' : state.search.devices.embed === 'cpu' ? ' Using the processor: no graphics card that could run it was found.' : '')
+  return (
+    <span className="status-thumbs status-indexing muted small" title={title} role="status" aria-live="off">
+      Indexing{step.vault ? ` ${step.vault}` : ''} · step {step.n} of {steps}: {step.label}
+      {known ? ` · ${count(step.done)} of ${count(step.total)}` : '…'}
+      {step.n === 2 && gpu ? ' · graphics card' : ''}
+      <span className={`bar small ${known ? '' : 'busy'}`}>
+        <span style={{ width: known ? `${(step.done / step.total) * 100}%` : '35%' }} />
+      </span>
+    </span>
+  )
 }

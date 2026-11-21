@@ -19,6 +19,8 @@ export interface CollectionInfo {
 export interface Collections {
   smart: CollectionInfo[]
   albums: CollectionInfo[]
+  /** Vaults with face grouping on: how many people, and how many wait for a name. */
+  people?: { count: number; unnamed: number }
 }
 
 export type ItemKind = 'photo' | 'video' | 'live' | 'burst'
@@ -50,6 +52,19 @@ export interface GalleryItem {
   frames?: number
   /** Changes when vault media changes, including a new burst cover. */
   revision?: number
+  /** Search results: where the words searched for are written in the photo, to highlight. */
+  marks?: TextMarks
+}
+
+/**
+ * Areas of a photo to highlight, as four-cornered shapes in the pixels of a
+ * w by h image the same shape as the photo. Each quad is x0, y0 … x3, y3:
+ * top left, top right, bottom right, bottom left of the text.
+ */
+export interface TextMarks {
+  w: number
+  h: number
+  quads: number[][]
 }
 
 export interface ItemFile {

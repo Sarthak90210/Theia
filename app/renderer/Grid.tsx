@@ -2,7 +2,8 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { mediaUrl, type GalleryItem, type SourceId } from '../shared/api.ts'
 import { clock } from './format.ts'
 import * as I from './icons.tsx'
-import { layoutGrid, rowOf, visibleRows, type View } from './layout.ts'
+import { TextMarks } from './TextMarks.tsx'
+import { layoutGrid, rowOf, SIDE, visibleRows, type View } from './layout.ts'
 
 export interface GridProps {
   source: SourceId
@@ -27,6 +28,9 @@ export interface GridProps {
   onStartSelecting: () => void
   /** The keyboard focus moved to this item, for the info panel. */
   onFocusKey?: (key: string | null) => void
+  /** Room under the glass toolbar above, and the glass bars below; photos scroll beneath both. */
+  insetTop?: number
+  insetBottom?: number
 }
 
 const OVERSCAN = 800
@@ -61,7 +65,12 @@ export function Grid(props: GridProps) {
     return () => ro.disconnect()
   }, [])
 
-  const layout = useMemo(() => layoutGrid(items, view, width, zoom), [items, view, width, zoom])
+  const insetTop = props.insetTop ?? 0
+  const insetBottom = props.insetBottom ?? 0
+  const layout = useMemo(
+    () => layoutGrid(items, view, width, zoom, { top: insetTop, bottom: insetBottom }),
+    [items, view, width, zoom, insetTop, insetBottom],
+  )
 
   // Keep the same item in view across zoom and resize, and start at the
   // newest photo (the bottom) like the phone does.
@@ -110,8 +119,9 @@ export function Grid(props: GridProps) {
     const el = box.current
     const row = rowOf(layout.rows, index)
     if (!el || !row) return
-    if (row.top < el.scrollTop) el.scrollTop = row.top - 8
-    else if (row.top + row.height > el.scrollTop + el.clientHeight) el.scrollTop = row.top + row.height - el.clientHeight + 8
+    // Clear of the glass bars, not just the edge of the scroll area.
+    if (row.top < el.scrollTop + insetTop) el.scrollTop = row.top - insetTop - 8
+    else if (row.top + row.height > el.scrollTop + el.clientHeight - insetBottom) el.scrollTop = row.top + row.height - el.clientHeight + insetBottom + 8
   }
 
   const onKeyDown = (e: React.KeyboardEvent) => {
@@ -191,7 +201,7 @@ export function Grid(props: GridProps) {
                   item={it}
                   index={r.start + j}
                   size={layout.tile}
-                  left={16 + j * (layout.tile + layout.gap)}
+                  left={SIDE + j * (layout.tile + layout.gap)}
                   thumb={size}
                   selected={selected.has(it.key)}
                   selecting={props.selecting && !overview}
@@ -272,6 +282,7 @@ const Tile = memo(function Tile({ source, item, index, size, left, thumb, select
           onError={() => setFailed(true)}
         />
       )}
+      {!failed && item.marks && <TextMarks marks={item.marks} fit="cover" className="tile-marks" />}
       {motion !== 'off' && (
         <video
           className={`tile-motion ${motion === 'playing' ? 'shown' : ''}`}

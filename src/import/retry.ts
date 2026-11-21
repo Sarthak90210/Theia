@@ -40,7 +40,8 @@ export function backoffMs(attempt: number, baseMs: number, capMs = 8000): number
 }
 
 export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  if (ms <= 0) return Promise.resolve()
+  // Already cancelled: nothing to wait for (an abort listener added now would never fire).
+  if (ms <= 0 || signal?.aborted) return Promise.resolve()
   return new Promise((resolve) => {
     const t = setTimeout(done, ms)
     function done() {

@@ -10,9 +10,21 @@ files:
   - '!dist-app/**/*.map'
   - package.json
   - THIRD-PARTY-NOTICES.md
+  # Search model runtime: Windows x64 only. Transformers.js carries its own
+  # copy of the web runtime inside its Node build, so onnxruntime-web is unused.
+  - '!node_modules/onnxruntime-web/**'
+  - '!node_modules/onnxruntime-node/bin/napi-v6/darwin/**'
+  - '!node_modules/onnxruntime-node/bin/napi-v6/linux/**'
+  - '!node_modules/onnxruntime-node/bin/napi-v6/win32/arm64/**'
+  - '!node_modules/@huggingface/transformers/dist/transformers.{js,min.js,web.js,web.min.js}'
+  - '!node_modules/@huggingface/transformers/dist/*.map'
 extraResources:
   - from: .release-tools/ffmpeg
     to: bin
+  # EmbeddingGemma 2 for search, pinned and verified by scripts/prepare-models.mjs.
+  # Shipped so search works offline from the first launch, with nothing to set up.
+  - from: .release-tools/models
+    to: models
   - from: THIRD-PARTY-NOTICES.md
     to: THIRD-PARTY-NOTICES.md
 win:

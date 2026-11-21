@@ -33,4 +33,23 @@ describe('app settings', () => {
     fs.writeFileSync(path.join(s.dir, 'settings.json'), '{"mapsEnabled":"yes"}')
     expect(new SettingsStore(s.dir).get().mapsEnabled).toBe(false)
   })
+
+  it('keeps indexing, pace and theme choices, and rejects anything else', () => {
+    const store = new SettingsStore(s.dir)
+    expect(store.get()).toMatchObject({ indexing: true, searchByMeaning: true, searchText: true, faceGrouping: true, indexingPace: 'balanced', theme: 'theia-dark', setupDone: false })
+    store.set({ indexing: false, searchText: false, indexingPace: 'gentle', theme: 'dracula', setupDone: true })
+    store.set({ customTheme: { background: '#101010', surface: '#202020', text: '#f0f0f0', accent: '#ff8800' } })
+    const again = new SettingsStore(s.dir).get()
+    expect(again).toMatchObject({ indexing: false, searchText: false, searchByMeaning: true, indexingPace: 'gentle', theme: 'dracula', setupDone: true })
+    expect(again.customTheme.accent).toBe('#ff8800')
+    expect(() => store.set({ theme: 'nope' } as never)).toThrow('Invalid settings')
+    expect(() => store.set({ indexingPace: 'turbo' } as never)).toThrow('Invalid settings')
+    expect(() => store.set({ customTheme: { background: 'red', surface: '#202020', text: '#f0f0f0', accent: '#ff8800' } } as never)).toThrow('Invalid settings')
+    expect(() => store.set({ customTheme: { background: '#000000', surface: '#202020', text: '#f0f0f0', accent: '#ff8800', extra: '#000000' } } as never)).toThrow('Invalid settings')
+  })
+
+  it('ignores damaged values in the file and keeps the rest', () => {
+    fs.writeFileSync(path.join(s.dir, 'settings.json'), JSON.stringify({ theme: 'no-such-theme', indexingPace: 'full', searchText: 'yes', mapsEnabled: true }))
+    expect(new SettingsStore(s.dir).get()).toMatchObject({ theme: 'theia-dark', indexingPace: 'full', searchText: true, mapsEnabled: true })
+  })
 })

@@ -43,6 +43,8 @@ export interface Layout {
 
 export const HEADER_HEIGHT = 64
 export const PAD = 24
+/** Space either side of the tiles: the same on both sides, and tight to the panel's edge. */
+export const SIDE = 12
 
 /** Tiles per row for a view, from the zoom slider's value. */
 export function perRowFor(view: View, zoom: number): number {
@@ -51,13 +53,17 @@ export function perRowFor(view: View, zoom: number): number {
   return zoom
 }
 
-export function layoutGrid(items: GalleryItem[], view: View, width: number, zoom: number): Layout {
+/**
+ * `inset`: room left above the first row and below the last, for glass bars
+ * that float over the grid (the photos scroll on underneath them).
+ */
+export function layoutGrid(items: GalleryItem[], view: View, width: number, zoom: number, inset = { top: 0, bottom: 0 }): Layout {
   const perRow = Math.max(1, perRowFor(view, zoom))
   const gap = view === 'years' ? 2 : 6
-  const inner = Math.max(0, width - PAD * 2)
+  const inner = Math.max(0, width - SIDE * 2)
   const tile = Math.max(1, Math.floor((inner - gap * (perRow - 1)) / perRow))
   const rows: Row[] = []
-  let top = view === 'all' ? PAD : 0
+  let top = (view === 'all' ? PAD : 0) + inset.top
 
   const pushTiles = (start: number, end: number) => {
     for (let i = start; i < end; i += perRow) {
@@ -76,7 +82,7 @@ export function layoutGrid(items: GalleryItem[], view: View, width: number, zoom
       top += 8
     }
   }
-  return { rows, height: top + PAD, tile, perRow, gap }
+  return { rows, height: top + PAD + inset.bottom, tile, perRow, gap }
 }
 
 interface Group {

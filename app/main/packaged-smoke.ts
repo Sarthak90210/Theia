@@ -8,6 +8,12 @@ import { app, type BrowserWindow } from 'electron'
 import { ExifToolReader } from '../../src/metadata/reader.ts'
 import { HeicPool } from '../../src/thumbs/heic-pool.ts'
 import { videoFrame } from '../../src/thumbs/video.ts'
+import { Embedder } from '../../src/search/embedder.ts'
+import { DIMENSIONS, MODEL_NAME } from '../../src/search/model.ts'
+import { OcrReader } from '../../src/search/ocr.ts'
+import { OCR_NAME } from '../../src/search/ocr-model.ts'
+import { FaceReader } from '../../src/search/faces.ts'
+import { FACE_NAME } from '../../src/search/face-model.ts'
 
 const exec = promisify(execFile)
 const options = { windowsHide: true, timeout: 30_000, maxBuffer: 4 * 1024 * 1024 }
@@ -23,10 +29,13 @@ interface Check {
 export async function preparePackagedSmoke(root: string): Promise<void> {
   fs.mkdirSync(path.join(root, 'profile'), { recursive: true })
   fs.writeFileSync(path.join(root, 'profile', 'gallery.json'), JSON.stringify({ vaults: [] }))
-  fs.writeFileSync(path.join(root, 'profile', 'settings.json'), JSON.stringify({ mapsEnabled: false }))
+  fs.writeFileSync(path.join(root, 'profile', 'settings.json'), JSON.stringify({ mapsEnabled: false, setupDone: true }))
   await sharp({ create: { width: 64, height: 48, channels: 3, background: '#4c7a82' } })
     .jpeg().toFile(path.join(root, 'generated.jpg'))
   fs.writeFileSync(path.join(root, 'invalid.heic'), 'Theia invalid HEIC fixture')
+  const print = `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="200"><rect width="100%" height="100%" fill="#fff"/>
+    <text x="40" y="115" font-family="Arial" font-size="56" font-weight="bold" fill="#111">THEIA 2026</text></svg>`
+  await sharp(Buffer.from(print)).webp().toFile(path.join(root, 'printed.webp'))
 }
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -116,6 +125,56 @@ export async function runPackagedSmoke(root: string, win: BrowserWindow): Promis
     } finally { await pool.close() }
   })
 
+  await check('bundled search model embeds a photo and a query offline', async () => {
+    const modelDir = path.join(process.resourcesPath, 'models', MODEL_NAME)
+    assert(Embedder.available(modelDir), `Search model files missing from ${modelDir}.`)
+    // 'auto': the graphics card when it runs the model and agrees with the
+    // processor, else the processor. Either passes; the receipt says which.
+    let device: unknown = null
+    const embedder = new Embedder(modelDir, { device: 'auto', onDevice: (d) => { device = d } })
+    try {
+      const started = Date.now()
+      const image = await within(embedder.image(jpeg), 'search image embedding', 120_000)
+      const query = await within(embedder.query('a teal coloured picture'), 'search query embedding', 60_000)
+      assert(image.length === DIMENSIONS && query.length === DIMENSIONS, 'Search vectors have the wrong size.')
+      const score = image.reduce((sum, x, i) => sum + x * query[i]!, 0)
+      assert(Number.isFinite(score) && score > 0, `Implausible search score ${score}.`)
+      return { modelDir, dimensions: image.length, score: Number(score.toFixed(3)), ms: Date.now() - started, device }
+    } finally { await embedder.close() }
+  })
+
+  await check('bundled text reader reads printed words offline', async () => {
+    const modelDir = path.join(process.resourcesPath, 'models', OCR_NAME)
+    assert(OcrReader.available(modelDir), `Text reading models missing from ${modelDir}.`)
+    const reader = new OcrReader(modelDir)
+    try {
+      const started = Date.now()
+      const { lines } = await within(reader.read(path.join(root, 'printed.webp')), 'text reading', 60_000)
+      const text = lines.map((l) => l.text).join(' ')
+      assert(text.includes('THEIA 2026'), `Read "${text}" instead of THEIA 2026.`)
+      return { modelDir, text, ms: Date.now() - started }
+    } finally { await reader.close() }
+  })
+
+  await check('bundled face models load, find no face in a plain picture, and group faces', async () => {
+    const modelDir = path.join(process.resourcesPath, 'models', FACE_NAME)
+    assert(FaceReader.available(modelDir), `Face models missing from ${modelDir}.`)
+    const reader = new FaceReader(modelDir)
+    try {
+      const started = Date.now()
+      const found = await within(reader.read(jpeg), 'face finding', 60_000)
+      assert(found.faces.length === 0, `Found ${found.faces.length} faces in a plain picture.`)
+      // Three photos of one face make a group.
+      const one = new Float32Array(128); one[5] = 1
+      const free = new Float32Array(3 * 128); for (let i = 0; i < 3; i++) free.set(one, i * 128)
+      const grouped = await reader.cluster({
+        free, freeAsset: Int32Array.from([1, 2, 3]), held: new Float32Array(0), heldAsset: new Int32Array(0), heldPerson: new Int32Array(0), rejects: [],
+      })
+      assert([...grouped.group].every((g) => g === 0), 'Three copies of one face did not make one group.')
+      return { modelDir, ms: Date.now() - started }
+    } finally { await reader.close() }
+  })
+
   await check('renderer, preload bridge and title-bar logo', async () => {
     win.webContents.setBackgroundThrottling(false)
     if (win.webContents.isLoadingMainFrame()) {
@@ -128,12 +187,12 @@ export async function runPackagedSmoke(root: string, win: BrowserWindow): Promis
       const until = Date.now() + 15000
       while (Date.now() < until) {
         const logo = document.querySelector('.titlebar img')
-        if (logo?.naturalWidth > 0 && document.querySelector('.welcome')) break
+        if (logo?.naturalWidth > 0 && document.querySelector('.welcome-hero')) break
         await new Promise(resolve => setTimeout(resolve, 50))
       }
       const logo = document.querySelector('.titlebar img')
       if (!logo || logo.naturalWidth <= 0) throw new Error('Title-bar logo failed to load')
-      if (!document.querySelector('.welcome')) throw new Error('Welcome screen did not render')
+      if (!document.querySelector('.welcome-hero')) throw new Error('Welcome screen did not render')
       if (!window.photos || typeof window.photos.getState !== 'function') throw new Error('Preload bridge missing')
       const state = await window.photos.getState()
       if (state.vaults.length !== 0) throw new Error('Unexpected vault in smoke profile')

@@ -113,6 +113,7 @@ export const Info = (p: P) => (
   </Svg>
 )
 export const Sidebar = (p: P) => <Svg {...p}><rect x="2.5" y="3.5" width="15" height="13" rx="2.5" /><path d="M7.5 3.5v13M4.8 7h.2M4.8 10h.2M4.8 13h.2" /></Svg>
+export const Search = (p: P) => <Svg {...p}><circle cx="8.8" cy="8.8" r="5.3" /><path d="m12.7 12.7 4 4" /></Svg>
 export const Clock = (p: P) => <Svg {...p}><circle cx="10" cy="10" r="7" /><path d="M10 5.5V10l3 2" /></Svg>
 export const Refresh = (p: P) => <Svg {...p}><path d="M16.3 8a6.5 6.5 0 1 0 .1 3M13 3.5l3.7 4.7-5.3.6" /></Svg>
 export const Plus = (p: P) => (

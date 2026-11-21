@@ -2,6 +2,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useSta
 import { mediaUrl, type AppState, type GalleryItem, type SourceId, type StoryboardInfo } from '../shared/api.ts'
 import { clock } from './format.ts'
 import * as I from './icons.tsx'
+import { Glass } from './glass/Glass.tsx'
 
 /**
  * The video player. Controls and keys follow YouTube's player, which most
@@ -266,6 +267,7 @@ export const VideoPlayer = forwardRef<PlayerHandle, Props>(function VideoPlayer(
 
       {src && (
         <div className="player-bar" onPointerDown={(e) => e.stopPropagation()}>
+          <Glass className="player-glass" radius={22} bend="strong">
           <Scrubber
             time={time}
             duration={duration}
@@ -352,6 +354,7 @@ export const VideoPlayer = forwardRef<PlayerHandle, Props>(function VideoPlayer(
               {full ? <I.ExitFullscreen /> : <I.Fullscreen />}
             </button>
           </div>
+          </Glass>
         </div>
       )}
     </div>

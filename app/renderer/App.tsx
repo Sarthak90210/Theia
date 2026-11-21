@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { AppState, Collections, GalleryItem, SourceId } from '../shared/api.ts'
+import { personCollection, personOf, searchCollection, searchQueryOf, type AppState, type Collections, type GalleryItem, type PersonInfo, type SourceId } from '../shared/api.ts'
 import { DiagnosisView } from './Diagnosis.tsx'
 import { count, plural, cleanError } from './format.ts'
 import { Grid } from './Grid.tsx'
@@ -14,6 +14,13 @@ import { Viewer } from './Viewer.tsx'
 import { VaultDialog } from './VaultDialog.tsx'
 import { LockedCollection, SetUpProtection, UnlockDialog } from './Protection.tsx'
 import { Preferences, type PreferencesPage } from './Preferences.tsx'
+import { SearchBox } from './SearchBox.tsx'
+import { parseQuery } from '../../src/search/query.ts'
+import { PeoplePage, PersonTitle } from './People.tsx'
+import { Welcome } from './Setup.tsx'
+import { applyTheme } from './theme.ts'
+import { Glass, GlassMode, useGlassMode } from './glass/Glass.tsx'
+import { WelcomeHero } from './WelcomeHero.tsx'
 
 const VIEWS: { id: View; name: string }[] = [
   { id: 'years', name: 'Years' },
@@ -31,7 +38,19 @@ export function App() {
   const pendingSource = useRef<SourceId | null>(null)
   const [collections, setCollections] = useState<Collections | null>(null)
   const [collection, setCollection] = useState('library')
+  /** What is typed in the search box. The search itself is the collection `search:<text>`. */
+  const [searchText, setSearchText] = useState('')
+  const searchInput = useRef<HTMLInputElement>(null)
+  /** Where Escape or clearing the box goes back to. */
+  const beforeSearch = useRef('library')
+  const searchQuery = searchQueryOf(collection)
+  /** What the search read as dates or kinds ("December 2025", "Videos"), and whether anything is left to match. */
+  const understood = useMemo(() => (searchQuery === null ? null : parseQuery(searchQuery)), [searchQuery])
   const [items, setItems] = useState<GalleryItem[] | null>(null)
+  /** The person whose photos are shown, for collection `person:<id>`. */
+  const personId = personOf(collection)
+  const [person, setPerson] = useState<PersonInfo | null>(null)
+  const [peopleNames, setPeopleNames] = useState<string[]>([])
   const [loadError, setLoadError] = useState<string | null>(null)
   const [view, setView] = useState<View>('all')
   const [zoom, setZoom] = useState(5)
@@ -61,6 +80,26 @@ export function App() {
     const t = setTimeout(() => setNotice(null), /could not|can't|failed|error/i.test(notice) ? 9000 : 4500)
     return () => clearTimeout(t)
   }, [notice])
+
+  const glassMode = useGlassMode(state?.settings.liquidGlass ?? true)
+  useEffect(() => { document.documentElement.dataset.glass = glassMode }, [glassMode])
+  /** Height of the glass toolbar floating over the photos, so the grid starts below it and scrolls under it. */
+  const chrome = useRef<HTMLDivElement | null>(null)
+  const [chromeH, setChromeH] = useState(0)
+  const chromeRef = useCallback((el: HTMLDivElement | null) => {
+    chrome.current = el
+    if (!el) return setChromeH(0)
+    const ro = new ResizeObserver(() => setChromeH(Math.ceil(el.getBoundingClientRect().height)))
+    ro.observe(el)
+    setChromeH(Math.ceil(el.getBoundingClientRect().height))
+  }, [])
+
+  // The chosen theme, as soon as the settings are known and whenever they change.
+  const themeKey = state ? JSON.stringify([state.settings.theme, state.settings.customTheme, state.settings.liquidGlass]) : null
+  useEffect(() => {
+    if (state) applyTheme(state.settings)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [themeKey])
 
   useEffect(() => {
     const off = window.photos.onState(setState)
@@ -103,6 +142,7 @@ export function App() {
     setSource(id)
     setCollections(null)
     setCollection('library')
+    setSearchText('')
     setItems(null)
     setView('all')
     stopSelecting()
@@ -120,7 +160,7 @@ export function App() {
     return () => {
       live = false
     }
-  }, [source, ready, sourceCount, sourceRevision, refresh])
+  }, [source, ready, sourceCount, sourceRevision, refresh, state?.search.peopleRevision])
 
   useEffect(() => {
     if (!source || !ready) return
@@ -143,7 +183,20 @@ export function App() {
     return () => {
       live = false
     }
-  }, [source, ready, collection, sourceCount, sourceRevision, refresh])
+  }, [source, ready, collection, sourceCount, sourceRevision, refresh, personId === null ? 0 : state?.search.peopleRevision])
+
+  useEffect(() => {
+    if (!source || personId === null) { setPerson(null); return }
+    let live = true
+    window.photos.person(source, personId).then((p) => {
+      if (!live) return
+      // Merged into someone else, or gone: back to People.
+      if (!p) { setCollection('people'); setItems(null); return }
+      setPerson(p)
+    }).catch(() => {})
+    window.photos.people(source).then((list) => live && setPeopleNames(list.flatMap((x) => (x.name ? [x.name] : [])))).catch(() => {})
+    return () => { live = false }
+  }, [source, personId, state?.search.peopleRevision])
 
   const list = items ?? []
   const keysAll = useMemo(() => list.map((i) => i.key), [list])
@@ -186,12 +239,43 @@ export function App() {
     anchor.current = start
   }
 
+  /**
+   * Show results for the typed text, or go back where the search started.
+   * The current grid stays up until results arrive, so the toolbar, and the
+   * search box with the caret in it, never disappear while typing.
+   */
+  const applySearch = (text: string) => {
+    const t = text.trim()
+    if (!t) {
+      if (searchQuery === null) return
+      setCollection(beforeSearch.current)
+      setItems(null)
+    } else {
+      const next = searchCollection(t)
+      if (next === collection) return
+      if (searchQuery === null) beforeSearch.current = collection
+      setCollection(next)
+    }
+    setView('all')
+    stopSelecting()
+    setViewer(null)
+    setScrollTo(null)
+  }
+
+  // Search a moment after typing stops.
+  useEffect(() => {
+    const t = setTimeout(() => applySearch(searchText), 350)
+    return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchText])
+
   const drill = (index: number) => {
     setScrollTo(list[index]?.key ?? null)
     setView(view === 'years' ? 'months' : 'days')
   }
 
   const pickCollection = (id: string) => {
+    setSearchText('')
     if (id === collection) return
     setCollection(id)
     setItems(null)
@@ -210,6 +294,7 @@ export function App() {
       if (ctrl && k === 'b') { e.preventDefault(); setSidebarOpen(open => !open) }
       else if (ctrl && k === 'i') { e.preventDefault(); setInfoOpen(open => !open) }
       else if (ctrl && k === ',') { e.preventDefault(); setPreferences('settings') }
+      else if (ctrl && k === 'f') { e.preventDefault(); searchInput.current?.focus(); searchInput.current?.select() }
       else if (k === 'f1' || (!ctrl && k === '?')) { e.preventDefault(); setPreferences('shortcuts') }
       else if (ctrl && k === 'o') {
         e.preventDefault()
@@ -247,14 +332,14 @@ export function App() {
     body = <DiagnosisView device={device} diagnosis={state.diagnosis} />
   } else if (!source) {
     body = (
-      <div className="empty welcome">
-        <div className="empty-symbol"><I.Album size={36} /></div>
-        <h2>Your photos, at home.</h2>
-        <p className="muted">Open a vault to browse your library, or connect an iPhone to start bringing your photos together.</p>
-        <button className="primary" onClick={() => void openVault()}>
-          Open a vault
-        </button>
-      </div>
+      <WelcomeHero
+        liquid={glassMode === 'liquid'}
+        dark={document.documentElement.dataset.theme !== 'light'}
+        onOpenVault={() => void openVault()}
+        onSettings={() => setPreferences('settings')}
+        onShortcuts={() => setPreferences('shortcuts')}
+        onPhone={() => setNotice('Plug your iPhone into this computer with a cable and unlock it. It appears in the sidebar by itself.')}
+      />
     )
   } else if (device?.state === 'opening') {
     body = (
@@ -275,6 +360,18 @@ export function App() {
         onSetUp={() => setProtect({ kind: 'setup', vault: vault.id })}
       />
     )
+  } else if (vault && collection === 'people') {
+    body = (
+      <PeoplePage
+        source={vault.id}
+        state={state}
+        onOpen={(id) => pickCollection(personCollection(id))}
+        onNotice={setNotice}
+        onError={showError}
+        sidebarOpen={sidebarOpen}
+        onSidebar={() => setSidebarOpen((open) => !open)}
+      />
+    )
   } else if (loadError) {
     body = (
       <div className="empty">
@@ -285,6 +382,15 @@ export function App() {
     )
   } else if (!items) {
     body = <div className="grid-skeleton" role="status" aria-label="Loading photos">{Array.from({ length: 18 }, (_, i) => <span key={i} />)}</div>
+  } else if (!items.length && searchQuery !== null) {
+    const indexing = state.search.indexing && vault && state.search.indexing.vault === vault.name ? state.search.indexing : null
+    body = <div className="empty">
+      <div className="empty-symbol"><I.Search size={30} /></div>
+      <h2>No matches for “{searchQuery}”</h2>
+      <p className="muted">{indexing
+        ? `Theia is still reading this vault's photos for search (${count(indexing.done)} of ${count(indexing.total)}). Try again in a little while.`
+        : 'Try describing what is in the photo, like “dinner with friends” or “snowy mountains”, words written in it, like “aadhaar”, a place or album name, or a time, like “goa last december”.'}</p>
+    </div>
   } else if (!items.length) {
     body = <div className="empty">
       <div className="empty-symbol">{collection === 'hidden' ? <I.Hidden size={30} /> : collection === 'deleted' ? <I.Trash size={30} /> : <I.Album size={30} />}</div>
@@ -294,6 +400,8 @@ export function App() {
   } else {
     body = (
       <Grid
+        // A new search starts at its best match, at the top.
+        key={searchQuery !== null || personId !== null ? collection : 'grid'}
         source={source}
         items={items}
         view={timeViews ? view : 'all'}
@@ -309,6 +417,8 @@ export function App() {
         selecting={selecting}
         onStartSelecting={() => setSelecting(true)}
         onFocusKey={setFocusKey}
+        insetTop={chromeH}
+        insetBottom={88}
       />
     )
   }
@@ -323,9 +433,10 @@ export function App() {
   }
 
   const sourceName = device?.name ?? vault?.name ?? ''
-  const showToolbar = ready && items !== null && !loadError
+  const showToolbar = ready && items !== null && !loadError && collection !== 'people'
 
   return (
+    <GlassMode.Provider value={glassMode}>
     <div className={`app ${infoOpen && source && ready ? 'with-info' : ''} ${sidebarOpen ? '' : 'sidebar-collapsed'}`}>
       {sidebarOpen && <Sidebar
         state={state}
@@ -340,95 +451,7 @@ export function App() {
         onShortcuts={() => setPreferences('shortcuts')}
       />}
 
-      <main className="main">
-        {showToolbar && viewer === null && (
-          <header className="toolbar">
-            <button className="ghost icon sidebar-toggle" aria-label={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'} aria-pressed={sidebarOpen} title="Toggle sidebar (Ctrl+B)" onClick={() => setSidebarOpen(open => !open)}><I.Sidebar /></button>
-            <div className="toolbar-title">
-              <h1>{current?.name ?? 'Library'}</h1>
-              <div className="muted small">
-                {sourceName} · {selected.size ? `${count(selected.size)} of ${plural(list.length, 'item')} selected` : plural(list.length, 'item')}
-              </div>
-            </div>
-            <div className="toolbar-actions">
-              {device && <button className="ghost icon" aria-label="Refresh iPhone" title="Refresh iPhone" onClick={() => void window.photos.retryDevice(source!).then(() => setRefresh(n => n + 1)).catch(e => showError(e.message))}><I.Refresh /></button>}
-              {vault && privateCollection && vault.protection !== 'unlocked' ? null : selecting ? (
-                <>
-                  <button className="ghost" onClick={() => (allSelected ? clearSelection() : setSelected(new Set(keysAll)))}>
-                    {allSelected ? 'Deselect All' : 'Select All'}
-                  </button>
-                  <button className="ghost select-toggle on" onClick={stopSelecting} title="Stop selecting (Esc)">
-                    Cancel
-                  </button>
-                </>
-              ) : (
-                <>
-                  <button className="ghost select-toggle" onClick={() => setSelecting(true)} title="Select photos and videos">
-                    Select
-                  </button>
-                  <SaveMenu state={state} source={source!} keys={saveKeys} label={saveLabel} primary onError={showError} />
-                </>
-              )}
-              {vault && privateCollection && vault.protection === 'unlocked' && (
-                <button className="ghost lock-button" onClick={() => void window.photos.lockVault(vault.id)} title="Lock Hidden and Recently Deleted">
-                  <I.Lock size={16} /> Lock
-                </button>
-              )}
-              <button className={`ghost icon ${infoOpen ? 'on' : ''}`} onClick={() => setInfoOpen((o) => !o)} aria-label="Info" aria-pressed={infoOpen} title="Info (Ctrl+I)"><I.Info /></button>
-            </div>
-            <div className="toolbar-controls">
-            {timeViews ? (
-              <div className="tabs" role="tablist" aria-label="Group photos by">
-                {VIEWS.map((v) => (
-                  <button
-                    key={v.id}
-                    role="tab"
-                    aria-selected={view === v.id}
-                    tabIndex={view === v.id ? 0 : -1}
-                    className={view === v.id ? 'tab on' : 'tab'}
-                    onKeyDown={e => {
-                      const delta = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0
-                      if (!delta) return
-                      e.preventDefault()
-                      const next = VIEWS[(VIEWS.findIndex(x => x.id === view) + delta + VIEWS.length) % VIEWS.length]!
-                      setView(next.id); setScrollTo(null)
-                      const tabs = e.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')
-                      tabs?.[VIEWS.findIndex(x => x.id === next.id)]?.focus()
-                    }}
-                    onClick={() => {
-                      setScrollTo(null)
-                      setView(v.id)
-                    }}
-                  >
-                    {v.name}
-                  </button>
-                ))}
-              </div>
-            ) : <span className="collection-kind">{current?.kind === 'album' ? 'Album' : 'Collection'}</span>}
-              <label className="zoom" title="Tile size">
-                <I.Grid size={14} />
-                <input type="range" min={-14} max={-3} value={-zoom} onChange={(e) => setZoom(-Number(e.target.value))} aria-label="Tile size" />
-              </label>
-            </div>
-          </header>
-        )}
-
-        {showToolbar && viewer === null && selecting && <div className="selection-bar">
-          <span className="selection-count">{selected.size ? `${count(selected.size)} selected` : 'Click photos and videos to select them'}</span>
-          {selected.size > 0 && <>
-            {vault && <VaultActions key={source! + collection} source={source!} keys={[...selected]} collection={collection}
-              onEdit={() => setEditor(list.find(i => i.key === [...selected][0]) ?? null)}
-              onChanged={() => { setViewer(null); setRefresh(n => n + 1); stopSelecting() }} onError={showError} />}
-            <SaveMenu state={state} source={source!} keys={[...selected]} label={`Save ${count(selected.size)} to…`} primary onError={showError} />
-          </>}
-        </div>}
-        {vault?.protectionError && <div className="collection-note bad" role="alert">Protection incomplete: {vault.protectionError}</div>}
-        {showToolbar && collection === 'deleted' && <div className="collection-note">
-          {vault ? 'Deleted items are encrypted and stay here until you recover them or delete them permanently.' : "Recently Deleted on your iPhone. You can view and save these here; recover or delete them on the iPhone. Theia never keeps copies of them in its cache."}
-        </div>}
-        {showToolbar && collection === 'hidden' && <div className="collection-note">
-          {vault ? 'Hidden items are encrypted in the vault folder and left out of the library and albums. Theia asks for the passcode to show them.' : "Hidden on your iPhone. Change what's hidden on the iPhone. Some originals may not be readable over USB. Theia never keeps copies of them in its cache."}
-        </div>}
+      <main className="main" style={{ '--chrome-h': `${showToolbar && viewer === null ? chromeH : 0}px` } as React.CSSProperties}>
         <div className="stage">
           {body}
           {viewer !== null && source && items && (
@@ -466,6 +489,137 @@ export function App() {
             />
           )}
         </div>
+
+        {showToolbar && viewer === null && (
+          <div className="chrome-top" ref={chromeRef}>
+          <header className="toolbar">
+            <div className="toolbar-row">
+            <Glass className="glass-group glass-round"><button className="ghost icon sidebar-toggle" aria-label={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'} aria-pressed={sidebarOpen} title="Toggle sidebar (Ctrl+B)" onClick={() => setSidebarOpen(open => !open)}><I.Sidebar /></button></Glass>
+            <div className="toolbar-title">
+              {person && vault ? (
+                <PersonTitle
+                  source={vault.id}
+                  person={person}
+                  names={peopleNames}
+                  onError={showError}
+                  onRenamed={(id, merged, name) => {
+                    setNotice(merged ? `Added to ${name}.` : `Named ${name}.`)
+                    if (merged) pickCollection(personCollection(id))
+                  }}
+                />
+              ) : <h1>{searchQuery !== null ? `“${searchQuery}”` : personId !== null ? 'Person' : (current?.name ?? 'Library')}</h1>}
+              <div className="muted small">
+                {sourceName}{understood?.labels.length ? ` · ${understood.labels.join(' · ')}` : ''} · {selected.size ? `${count(selected.size)} of ${plural(list.length, 'item')} selected` : plural(list.length, searchQuery !== null ? 'result' : 'item')}
+                {searchQuery !== null && state.search.indexing && state.search.indexing.vault === vault?.name &&
+                  ` · still reading photos for search, ${count(state.search.indexing.done)} of ${count(state.search.indexing.total)}`}
+              </div>
+            </div>
+            <Glass className="glass-group toolbar-actions">
+              {device && <button className="ghost icon" aria-label="Refresh iPhone" title="Refresh iPhone" onClick={() => void window.photos.retryDevice(source!).then(() => setRefresh(n => n + 1)).catch(e => showError(e.message))}><I.Refresh /></button>}
+              {vault && privateCollection && vault.protection !== 'unlocked' ? null : selecting ? (
+                <>
+                  <button className="ghost" onClick={() => (allSelected ? clearSelection() : setSelected(new Set(keysAll)))}>
+                    {allSelected ? 'Deselect All' : 'Select All'}
+                  </button>
+                  <button className="ghost select-toggle on" onClick={stopSelecting} title="Stop selecting (Esc)">
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button className="ghost select-toggle" onClick={() => setSelecting(true)} title="Select photos and videos">
+                    Select
+                  </button>
+                  <SaveMenu state={state} source={source!} keys={saveKeys} label={saveLabel} primary onError={showError} />
+                </>
+              )}
+              {vault && privateCollection && vault.protection === 'unlocked' && (
+                <button className="ghost lock-button" onClick={() => void window.photos.lockVault(vault.id)} title="Lock Hidden and Recently Deleted">
+                  <I.Lock size={16} /> Lock
+                </button>
+              )}
+              <button className={`ghost icon ${infoOpen ? 'on' : ''}`} onClick={() => setInfoOpen((o) => !o)} aria-label="Info" aria-pressed={infoOpen} title="Info (Ctrl+I)"><I.Info /></button>
+            </Glass>
+            </div>
+            <div className="toolbar-row toolbar-controls">
+            {timeViews ? (
+              <Glass className="glass-group glass-segmented">
+              <div className="tabs" role="tablist" aria-label="Group photos by" style={{ '--tab': VIEWS.findIndex((x) => x.id === view), '--tabs': VIEWS.length } as React.CSSProperties}>
+                <span className="tab-thumb" aria-hidden="true" />
+                {VIEWS.map((v) => (
+                  <button
+                    key={v.id}
+                    role="tab"
+                    aria-selected={view === v.id}
+                    tabIndex={view === v.id ? 0 : -1}
+                    className={view === v.id ? 'tab on' : 'tab'}
+                    onKeyDown={e => {
+                      const delta = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0
+                      if (!delta) return
+                      e.preventDefault()
+                      const next = VIEWS[(VIEWS.findIndex(x => x.id === view) + delta + VIEWS.length) % VIEWS.length]!
+                      setView(next.id); setScrollTo(null)
+                      const tabs = e.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')
+                      tabs?.[VIEWS.findIndex(x => x.id === next.id)]?.focus()
+                    }}
+                    onClick={() => {
+                      setScrollTo(null)
+                      setView(v.id)
+                    }}
+                  >
+                    {v.name}
+                  </button>
+                ))}
+              </div>
+              </Glass>
+            ) : <span className="collection-kind">{understood ? (understood.text ? 'Best matches first' : 'Newest first') : personId !== null ? (
+                <>
+                  <button className="ghost small" onClick={() => pickCollection('people')}><I.Left size={14} /> People</button>
+                  {person && <button className="ghost small" title="Leave them out of People" onClick={() => void window.photos.hidePerson(source!, person.id, !person.hidden)
+                    .then(() => { setNotice(person.hidden ? 'Shown in People again.' : 'Hidden from People.'); if (!person.hidden) pickCollection('people') })
+                    .catch((e: Error) => showError(e.message))}>{person.hidden ? 'Show in People' : 'Hide from People'}</button>}
+                </>
+              ) : current?.kind === 'album' ? 'Album' : 'Collection'}</span>}
+              {vault && <Glass className="glass-group glass-search"><SearchBox
+                ref={searchInput}
+                value={searchText}
+                onChange={setSearchText}
+                onSubmit={() => applySearch(searchText)}
+                onClear={() => { setSearchText(''); applySearch('') }}
+              /></Glass>}
+              <Glass className="glass-group glass-zoom">
+              <label className="zoom" title="Tile size">
+                <I.Grid size={14} />
+                <input type="range" min={-14} max={-3} value={-zoom} onChange={(e) => setZoom(-Number(e.target.value))} aria-label="Tile size" />
+              </label>
+              </Glass>
+            </div>
+          </header>
+          {vault?.protectionError && <div className="collection-note bad" role="alert">Protection incomplete: {vault.protectionError}</div>}
+          {collection === 'deleted' && <div className="collection-note">
+            {vault ? 'Deleted items are encrypted and stay here until you recover them or delete them permanently.' : "Recently Deleted on your iPhone. You can view and save these here; recover or delete them on the iPhone. Theia never keeps copies of them in its cache."}
+          </div>}
+          {collection === 'hidden' && <div className="collection-note">
+            {vault ? 'Hidden items are encrypted in the vault folder and left out of the library and albums. Theia asks for the passcode to show them.' : "Hidden on your iPhone. Change what's hidden on the iPhone. Some originals may not be readable over USB. Theia never keeps copies of them in its cache."}
+          </div>}
+          </div>
+        )}
+
+        {showToolbar && viewer === null && selecting && <div className="floating-bottom"><Glass className="glass-group selection-bar" radius={26}>
+          <span className="selection-count">{selected.size ? `${count(selected.size)} selected` : 'Click photos and videos to select them'}</span>
+          {selected.size > 0 && <>
+            {vault && person && <button className="ghost" title="Take these photos out of this person. Theia won't put them back." onClick={() => {
+              const keys = [...selected]
+              void window.photos.removeFromPerson(vault.id, person.id, keys)
+                .then((n) => { setNotice(`${plural(n, 'photo')} taken out of ${person.name ?? 'this person'}.`); stopSelecting(); setRefresh((r) => r + 1) })
+                .catch((e: Error) => showError(e.message))
+            }}>Not {person.name ?? 'this person'}</button>}
+            {vault && <VaultActions key={source! + collection} source={source!} keys={[...selected]} collection={collection}
+              onEdit={() => setEditor(list.find(i => i.key === [...selected][0]) ?? null)}
+              onChanged={() => { setViewer(null); setRefresh(n => n + 1); stopSelecting() }} onError={showError} />}
+            <SaveMenu state={state} source={source!} keys={[...selected]} label={`Save ${count(selected.size)} to…`} primary onError={showError} />
+          </>}
+        </Glass></div>}
 
         {editor && source && <Editor key={source + editor.key} source={source} item={editor}
           onClose={() => setEditor(null)} onSaved={(key) => {
@@ -533,7 +687,9 @@ export function App() {
           }
         />
       )}
+      {!state.settings.setupDone && !preferences && <Welcome settings={state.settings} onError={showError} />}
       {preferences && <Preferences settings={state.settings} page={preferences} onPage={setPreferences} onClose={() => setPreferences(null)} />}
     </div>
+    </GlassMode.Provider>
   )
 }

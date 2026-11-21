@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { AppSettings } from '../shared/settings.ts'
 import * as I from './icons.tsx'
+import { IndexingSettings, ThemeSettings, useSettingsChange } from './Setup.tsx'
 
 export type PreferencesPage = 'settings' | 'shortcuts'
 
@@ -11,6 +12,7 @@ const SHORTCUTS = [
     ['Ctrl+,', 'Settings'],
     ['? or F1', 'Keyboard shortcuts'],
     ['Ctrl+B', 'Show or hide the sidebar'],
+    ['Ctrl+F', 'Search the vault'],
     ['Ctrl+I', 'Show or hide info'],
     ['Ctrl+R', 'Refresh the current source'],
   ]],
@@ -76,6 +78,8 @@ export function Preferences({ settings, page, onPage, onClose }: {
     finally { setBusy(false) }
   }
 
+  const [change, changing] = useSettingsChange(setError)
+
   return createPortal(<div className="modal-scrim preferences-scrim" onPointerDown={e => { if (e.target === e.currentTarget) onClose() }} onKeyDown={e => {
     e.stopPropagation()
     if (e.key === 'Escape') { e.preventDefault(); onClose() }
@@ -92,16 +96,21 @@ export function Preferences({ settings, page, onPage, onClose }: {
         <button className="ghost icon" onClick={onClose} aria-label="Close settings"><I.Close /></button>
       </div>
       <div className="preferences-tabs" aria-label="Settings pages">
-        <button className={`ghost ${page === 'settings' ? 'on' : ''}`} aria-pressed={page === 'settings'} onClick={() => onPage('settings')}>Privacy</button>
+        <button className={`ghost ${page === 'settings' ? 'on' : ''}`} aria-pressed={page === 'settings'} onClick={() => onPage('settings')}>General</button>
         <button className={`ghost ${page === 'shortcuts' ? 'on' : ''}`} aria-pressed={page === 'shortcuts'} onClick={() => onPage('shortcuts')}>Keyboard shortcuts</button>
       </div>
       <div className="preferences-body">
-        {page === 'settings' ? <section className="privacy-setting">
+        {page === 'settings' ? <div className="settings-page">
+          <ThemeSettings settings={settings} onChange={change} />
+          <IndexingSettings settings={settings} onChange={change} busy={changing} />
+          <section className="privacy-setting setting-group">
+          <h3>Maps</h3>
           <label><input type="checkbox" checked={settings.mapsEnabled} aria-disabled={busy} onChange={e => void maps(e.target.checked)} /><span>Show maps in photo info</span></label>
           <p className="muted">Maps request tiles from OpenStreetMap. These requests reveal the photo's approximate area to its tile servers.</p>
           <p className="muted">Turn this off to stop map requests. Place names and coordinates remain available. Opening a location in your browser is a separate action.</p>
+          </section>
           {error && <p role="alert" className="bad">{error}</p>}
-        </section> : SHORTCUTS.map(([name, rows]) => <section className="shortcut-section" key={name}>
+        </div> : SHORTCUTS.map(([name, rows]) => <section className="shortcut-section" key={name}>
           <h3>{name}</h3>
           <dl>{rows.map(([keys, description]) => <div key={keys}><dt><kbd>{keys}</kbd></dt><dd>{description}</dd></div>)}</dl>
         </section>)}

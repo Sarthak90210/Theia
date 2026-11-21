@@ -39,6 +39,8 @@ export function Sidebar({ state, source, collections, collection, onSource, onCo
 
   return (
     <nav className="sidebar" aria-label="Sources">
+      {/* Scrolls inside the rounded panel, so its scrollbar stays within the panel's edge. */}
+      <div className="sidebar-scroll">
       <div className="side-section">
         <div className="side-heading">Devices</div>
         {state.devices.map((d) => (
@@ -98,6 +100,20 @@ export function Sidebar({ state, source, collections, collection, onSource, onCo
         <>
           <div className="side-section">
             <div className="side-heading">Collections</div>
+            {collections.people && (
+              <button
+                className={`side-item ${collection === 'people' || collection.startsWith('person:') ? 'active' : ''}`}
+                aria-current={collection === 'people' ? 'page' : undefined}
+                onClick={() => onCollection('people')}
+                title={collections.people.unnamed ? `${count(collections.people.unnamed)} people to name` : undefined}
+              >
+                <I.Person />
+                <span className="side-label">People</span>
+                {collections.people.unnamed > 0
+                  ? <span className="side-count to-name">{count(collections.people.unnamed)} new</span>
+                  : <span className="side-count">{count(collections.people.count)}</span>}
+              </button>
+            )}
             {collections.smart.filter(c => c.kind !== 'utility').map((c) => {
               const Icon = SMART_ICON[c.id] ?? I.Grid
               return (
@@ -145,6 +161,7 @@ export function Sidebar({ state, source, collections, collection, onSource, onCo
         <div className="side-heading">App</div>
         <button className="side-item" onClick={onSettings} title="Settings (Ctrl+,)"><I.Sliders /><span className="side-label">Settings</span></button>
         <button className="side-item" onClick={onShortcuts} title="Keyboard shortcuts (? or F1)"><I.Info /><span className="side-label">Keyboard shortcuts</span></button>
+      </div>
       </div>
     </nav>
   )

@@ -1,0 +1,349 @@
+/*
+ * Liquid Glass, after Apple's 2025 design language (macOS Tahoe, iOS 26):
+ *
+ * - Content is edge to edge; the navigation layer floats over it as glass.
+ *   The photo grid scrolls on underneath the toolbar and the bottom bars.
+ * - Controls are capsules; related buttons share one piece of glass. Titles
+ *   are not glass. Corners nest concentrically.
+ * - A scroll edge effect softens what passes under the toolbar, so its title
+ *   stays readable over any photo.
+ * - Panels that are not over content (sidebar, inspector, menus, sheets) are
+ *   a thicker frosted glass with a lit rim.
+ * - Motion is springy and short; reduced motion and reduced transparency are
+ *   honoured.
+ *
+ * Glass elements come from Glass.tsx (React Bits GlassSurface): the edge
+ * bends what is behind it with an SVG displacement backdrop filter.
+ */
+
+:root {
+  --spring: cubic-bezier(0.32, 1.45, 0.6, 1);
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --glass-tint: color-mix(in srgb, var(--surface) 46%, transparent);
+  --glass-tint-strong: color-mix(in srgb, var(--surface) 72%, transparent);
+  --glass-rim: inset 0 1px 0 rgb(255 255 255 / 22%), inset 0 0 0 0.5px rgb(255 255 255 / 12%);
+  --glass-lift: 0 10px 30px rgb(0 0 0 / 18%), 0 2px 6px rgb(0 0 0 / 10%);
+}
+:root[data-theme='light'] {
+  --glass-tint: color-mix(in srgb, var(--surface) 58%, transparent);
+  --glass-tint-strong: color-mix(in srgb, var(--surface) 80%, transparent);
+  --glass-rim: inset 0 1px 0 rgb(255 255 255 / 85%), inset 0 0 0 0.5px rgb(0 0 0 / 6%);
+  --glass-lift: 0 10px 30px rgb(0 0 0 / 10%), 0 2px 6px rgb(0 0 0 / 6%);
+}
+
+/* ------------------------------------------------------- the glass element */
+
+.glass.glass-surface {
+  display: inline-flex;
+  align-items: center;
+  overflow: visible;
+  isolation: isolate;
+  transition: box-shadow 0.25s var(--ease-out), transform 0.3s var(--spring);
+}
+/* Content sits straight on the glass: its own layout, not a centred box. */
+.glass.glass-surface > .glass-surface__content { display: contents; }
+.glass.glass-surface--svg {
+  background: var(--glass-tint);
+  -webkit-backdrop-filter: var(--filter-id) blur(5px) saturate(1.7);
+  backdrop-filter: var(--filter-id) blur(5px) saturate(1.7);
+  box-shadow: var(--glass-rim), var(--glass-lift);
+}
+.glass.glass-surface--fallback {
+  background: var(--glass-tint-strong);
+  -webkit-backdrop-filter: blur(22px) saturate(1.6);
+  backdrop-filter: blur(22px) saturate(1.6);
+  box-shadow: var(--glass-rim), var(--glass-lift);
+}
+.glass .glass-surface__sheen, .glass .glass-surface__rim { border-radius: inherit; }
+
+/* A specular highlight that follows the top edge, as light catching glass. */
+.glass.glass-surface::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgb(255 255 255 / 14%), transparent 42%, transparent 70%, rgb(255 255 255 / 5%));
+  mix-blend-mode: soft-light;
+}
+
+/* Buttons on glass: no box of their own, a soft highlight, a springy press. */
+.glass-group { gap: 2px; padding: 3px; min-height: 40px; }
+.glass-group button, .glass-group .menu-anchor > button {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  border-radius: 999px;
+  min-height: 34px;
+  padding: 0 14px;
+  transition: background 0.15s, transform 0.28s var(--spring), color 0.15s;
+}
+.glass-group button.icon { width: 34px; padding: 0; justify-content: center; }
+.glass-group button:hover { background: var(--hover); }
+.glass-group button:active { transform: scale(0.94); }
+.glass-group button.on, .glass-group button[aria-pressed='true'] { background: var(--accent-soft); }
+.glass-group button.primary, .glass-group .menu-anchor > button.primary { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.glass-group button.primary:hover { filter: brightness(1.08); }
+.glass-round { padding: 3px; }
+
+/* Buttons everywhere else press the same way. */
+button { transition: background 0.15s, transform 0.28s var(--spring), box-shadow 0.2s, color 0.15s; }
+button:active:not(:disabled) { transform: scale(0.96); }
+
+/* ---------------------------------------------------- the floating toolbar */
+
+.main { position: relative; }
+.main > .stage { position: absolute; inset: 0; }
+.chrome-top {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  pointer-events: none;
+}
+.chrome-top > * { pointer-events: auto; }
+/* Scroll edge effect: what passes under the toolbar is blurred and dimmed toward the top. */
+.chrome-top::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 -36px 0;
+  z-index: -1;
+  pointer-events: none;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--bg) 82%, transparent) 0%, color-mix(in srgb, var(--bg) 55%, transparent) 55%, transparent 100%);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 52%, transparent 100%);
+  mask-image: linear-gradient(180deg, #000 0%, #000 52%, transparent 100%);
+}
+.chrome-top > .toolbar {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  min-height: 0;
+  gap: 12px;
+  padding: 18px 24px 12px;
+  background: none;
+  border: 0;
+}
+.toolbar-row { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.toolbar-row > .toolbar-title { flex: 1; min-width: 0; }
+.toolbar-title h1 { font-size: 28px; font-weight: 700; letter-spacing: -0.025em; line-height: 1.15; }
+.toolbar-title .small { margin-top: 3px; }
+.toolbar-row.toolbar-controls { margin: 0; justify-content: flex-start; }
+.toolbar-row.toolbar-controls > .glass-zoom { margin-left: auto; }
+.chrome-top > .collection-note { margin: 0 28px 10px; }
+
+/* The search field is a capsule of glass of its own. */
+.glass-search { flex: 1 1 280px; max-width: 440px; min-width: 180px; padding: 0; }
+.glass-search .search-box { flex: 1; max-width: none; background: none; border: 0; box-shadow: none; height: 38px; }
+.glass-search:focus-within { box-shadow: 0 0 0 2px var(--focus), var(--glass-rim), var(--glass-lift); }
+.glass-zoom { padding: 0 14px; }
+.glass-zoom .zoom { gap: 10px; }
+
+/* Segmented control: a glass thumb slides to the chosen tab with a little overshoot. */
+.glass-segmented { padding: 3px; }
+.glass-segmented .tabs { position: relative; display: grid; grid-template-columns: repeat(var(--tabs), 1fr); background: none; border: 0; box-shadow: none; padding: 0; gap: 0; }
+.glass-segmented .tab { position: relative; z-index: 1; background: none !important; box-shadow: none !important; min-height: 32px; padding: 0 16px; font-size: 12px; transition: color 0.2s; }
+.glass-segmented .tab.on { font-weight: 600; }
+.tab-thumb {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: calc(100% / var(--tabs));
+  transform: translateX(calc(var(--tab) * 100%));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface) 92%, var(--text) 8%);
+  box-shadow: 0 1px 6px rgb(0 0 0 / 18%), inset 0 1px 0 rgb(255 255 255 / 18%);
+  transition: transform 0.42s var(--spring);
+}
+:root[data-theme='light'] .tab-thumb { background: #fff; box-shadow: 0 1px 6px rgb(0 0 0 / 12%); }
+
+/* Empty states and the loading skeleton sit below the toolbar too. */
+.stage > .empty, .stage > .grid-skeleton { padding-top: calc(var(--chrome-h, 0px) + 12px); }
+
+/* ------------------------------------------------- floating bars, bottom */
+
+.floating-bottom {
+  position: absolute;
+  left: 50%;
+  bottom: 20px;
+  transform: translateX(-50%);
+  z-index: 25;
+  max-width: calc(100% - 40px);
+  animation: rise-in 0.38s var(--spring);
+}
+.glass-group.selection-bar { margin: 0; border: 0; padding: 5px 6px 5px 16px; gap: 8px; min-height: 48px; flex-wrap: wrap; }
+.selection-bar .selection-count { font-weight: 600; margin-right: 6px; white-space: nowrap; }
+@keyframes rise-in { from { opacity: 0; transform: translate(-50%, 14px) scale(0.96); } to { opacity: 1; transform: translate(-50%, 0) scale(1); } }
+
+/* The status is a glass pill floating bottom left, there only when there is something to say. */
+.main > .status {
+  position: absolute;
+  left: 18px;
+  bottom: 18px;
+  z-index: 24;
+  max-width: min(720px, calc(100% - 36px));
+  min-height: 0;
+  padding: 9px 16px;
+  border-radius: 20px;
+  background: var(--glass-tint-strong);
+  -webkit-backdrop-filter: blur(24px) saturate(1.7);
+  backdrop-filter: blur(24px) saturate(1.7);
+  box-shadow: var(--glass-rim), var(--glass-lift);
+  border: 0;
+}
+.main > .status:empty { display: none; }
+.main > .status .status-thumbs { margin-left: 0; }
+.toast { bottom: 84px !important; border-radius: 22px !important; background: var(--glass-tint-strong) !important; -webkit-backdrop-filter: blur(26px) saturate(1.7); backdrop-filter: blur(26px) saturate(1.7); box-shadow: var(--glass-rim), var(--glass-lift) !important; border: 0 !important; animation: toast-in 0.4s var(--spring); }
+@keyframes toast-in { from { opacity: 0; translate: 0 12px; scale: 0.96; } to { opacity: 1; translate: 0 0; scale: 1; } }
+
+/* ------------------------------------------------- frosted glass panels */
+
+/* The sidebar floats as a pane of glass beside the content. */
+.sidebar {
+  background: var(--glass-tint-strong) !important;
+  -webkit-backdrop-filter: blur(30px) saturate(1.8);
+  backdrop-filter: blur(30px) saturate(1.8);
+  border: 0 !important;
+  box-shadow: var(--glass-rim), var(--glass-lift) !important;
+  border-radius: 26px !important;
+}
+.side-item { transition: background 0.15s, transform 0.28s var(--spring); }
+.side-item.active { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.side-item:hover:not(.active) { background: var(--hover); }
+
+/* Menus, sheets, popovers: thick glass, larger concentric corners. */
+.menu {
+  background: var(--glass-tint-strong) !important;
+  -webkit-backdrop-filter: blur(30px) saturate(1.8);
+  backdrop-filter: blur(30px) saturate(1.8);
+  border: 0 !important;
+  border-radius: 20px !important;
+  box-shadow: var(--glass-rim), 0 18px 50px rgb(0 0 0 / 28%) !important;
+  transform-origin: top right;
+  animation: pop-in 0.26s var(--spring);
+}
+.menu-item { border-radius: 12px !important; }
+@keyframes pop-in { from { opacity: 0; transform: scale(0.92); } to { opacity: 1; transform: scale(1); } }
+
+.modal-scrim { background: color-mix(in srgb, #000 34%, transparent); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); animation: fade-in 0.2s ease-out; }
+.preferences, .confirm-dialog, .vault-dialog {
+  /* Sheets hold reading and controls: nearly solid, so what is behind never competes. */
+  background: color-mix(in srgb, var(--surface) 93%, transparent) !important;
+  -webkit-backdrop-filter: blur(40px) saturate(1.8);
+  backdrop-filter: blur(40px) saturate(1.8);
+  border: 0 !important;
+  border-radius: 28px !important;
+  box-shadow: var(--glass-rim), 0 30px 80px rgb(0 0 0 / 35%) !important;
+  animation: sheet-in 0.36s var(--spring);
+}
+@keyframes sheet-in { from { opacity: 0; transform: translateY(12px) scale(0.97); } to { opacity: 1; transform: none; } }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* The inspector sits edge to edge alongside the content, as glass. */
+.info {
+  background: var(--glass-tint-strong) !important;
+  -webkit-backdrop-filter: blur(30px) saturate(1.8);
+  backdrop-filter: blur(30px) saturate(1.8);
+}
+
+/* People cards and setting cards: content, not glass, but with the same soft corners. */
+.who-card, .same-card { border-radius: 22px; }
+
+/* ------------------------------------------------ viewer and video player */
+
+.glass.viewer-bar { position: absolute; top: 14px; left: 16px; right: 16px; z-index: 12; display: flex; gap: 8px; padding: 6px 8px; border: 0; }
+.glass.viewer-bar .viewer-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.glass.viewer-bar button { border-radius: 999px; }
+.player-bar { background: none !important; border: 0 !important; box-shadow: none !important; padding: 0 !important; -webkit-backdrop-filter: none !important; backdrop-filter: none !important; }
+.glass.player-glass { display: flex; flex-direction: column; align-items: stretch; width: 100%; padding: 10px 14px; gap: 6px; }
+
+/* ----------------------------------------------------- the welcome screen */
+
+.welcome-hero { display: flex; flex-direction: column; align-items: center; gap: 18px; height: 100%; padding: 24px 24px 48px; overflow: auto; }
+.welcome-hero-glass { width: min(100%, 980px); height: min(52vh, 460px); flex-shrink: 0; position: relative; }
+.welcome-hero-glass .fluid-glass { border-radius: 28px; }
+.welcome-hero-title { margin: 0; height: 100%; display: grid; place-items: center; text-align: center; font-size: clamp(42px, 8vw, 96px); line-height: 1.02; font-weight: 700; letter-spacing: -0.04em; }
+.welcome-hero-note { max-width: 520px; text-align: center; margin: 0 0 12px; }
+
+/* --------------------------------------------- less motion, less glass */
+
+@media (prefers-reduced-motion: reduce) {
+  .tab-thumb, .floating-bottom, .toast, .menu, .preferences, .confirm-dialog, .modal-scrim { transition: none !important; animation: none !important; }
+  button:active:not(:disabled) { transform: none; }
+}
+/* Liquid Glass off, or Windows asking for less transparency: solid panels. */
+:root[data-glass='frosted'] .glass.glass-surface--fallback,
+:root[data-glass='frosted'] .main > .status,
+:root[data-glass='frosted'] .sidebar,
+:root[data-glass='frosted'] .menu {
+  background: color-mix(in srgb, var(--surface) 94%, transparent) !important;
+}
+@media (prefers-reduced-transparency: reduce) {
+  .chrome-top::before { -webkit-backdrop-filter: none; backdrop-filter: none; background: var(--bg); mask-image: none; -webkit-mask-image: none; }
+}
+
+/* Bars floating over photos need more tint than bars over the toolbar's soft edge. */
+.floating-bottom .glass, .glass.viewer-bar, .glass.player-glass { --glass-tint: var(--glass-tint-strong); }
+.glass-group.selection-bar { flex-wrap: nowrap; white-space: nowrap; }
+.glass-group.selection-bar .vault-actions { display: contents; }
+.selection-bar .selection-count { color: var(--text); }
+
+/* ---------------------------------------- Windows 11 acrylic behind the window */
+/* The desktop shows through the title bar and around and through the sidebar;
+   the content area stays solid, so photos are seen as they are. */
+:root[data-acrylic='on'], :root[data-acrylic='on'] body, :root[data-acrylic='on'] #root, :root[data-acrylic='on'] .app { background: transparent !important; }
+:root[data-acrylic='on'] .titlebar { background: transparent; }
+:root[data-acrylic='on'] .main { background: var(--bg); border-top-left-radius: 22px; box-shadow: -1px 0 0 var(--line); }
+:root[data-acrylic='on'] .app.sidebar-collapsed .main { border-top-left-radius: 0; }
+:root[data-acrylic='on'] .sidebar { background: color-mix(in srgb, var(--surface) 38%, transparent) !important; -webkit-backdrop-filter: none; backdrop-filter: none; }
+:root[data-acrylic='on'] .info { background: color-mix(in srgb, var(--surface) 55%, transparent) !important; }
+
+/* ------------------------------------------------------ the window frame */
+/* Sidebar, content and inspector are three panels floating in the window,
+   with one gap between them and around them, the same corners, and the same
+   top and bottom edges. (Replaces the uneven margins of earlier styles.) */
+:root { --frame-gap: 10px; --pane-radius: 16px; }
+.app { gap: var(--frame-gap); padding: 2px var(--frame-gap) var(--frame-gap); box-sizing: border-box; }
+.app > .sidebar { margin: 0 !important; border-radius: var(--pane-radius) !important; min-height: 0; }
+.app > .main {
+  border-radius: var(--pane-radius);
+  overflow: hidden;
+  background: var(--bg);
+  box-shadow: 0 0 0 1px var(--line);
+}
+:root[data-acrylic='on'] .app > .main { border-top-left-radius: var(--pane-radius); box-shadow: 0 0 0 1px var(--line), 0 8px 30px rgb(0 0 0 / 18%); }
+:root[data-acrylic='on'] .app.sidebar-collapsed > .main { border-top-left-radius: var(--pane-radius); }
+.app > .info { margin: 0 !important; border-radius: var(--pane-radius); overflow: hidden; box-shadow: 0 0 0 1px var(--line); }
+/* Without the acrylic, the frame is a shade darker than the panels, so they read as floating. */
+:root:not([data-acrylic='on']) .app { background: color-mix(in srgb, var(--bg) 78%, #000); }
+:root[data-theme='light']:not([data-acrylic='on']) .app { background: color-mix(in srgb, var(--bg) 93%, #000); }
+:root:not([data-acrylic='on']) .titlebar { background: var(--bg); }
+/* The sidebar's contents keep a small, even inset from its rounded edge. */
+.sidebar-scroll { padding: 10px 6px 12px 8px; margin: 4px 2px 4px 0; }
+/* Group titles line up with the tiles. */
+.grid-header { padding: 0 12px 12px !important; }
+.chrome-top > .toolbar { padding: 14px 14px 10px 14px; }
+.chrome-top > .collection-note { margin: 0 16px 8px; }
+
+/* Softer scroll edge: a wide blur and a smooth fade, so photos under the
+   toolbar become colour, not blocks. */
+.chrome-top::before {
+  inset: 0 0 -56px 0;
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--bg) 90%, transparent) 0%,
+    color-mix(in srgb, var(--bg) 72%, transparent) 45%,
+    color-mix(in srgb, var(--bg) 30%, transparent) 75%,
+    transparent 100%);
+  -webkit-backdrop-filter: blur(40px) saturate(1.15);
+  backdrop-filter: blur(40px) saturate(1.15);
+  -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 45%, rgb(0 0 0 / 55%) 72%, transparent 100%);
+  mask-image: linear-gradient(180deg, #000 0%, #000 45%, rgb(0 0 0 / 55%) 72%, transparent 100%);
+}
+/* The glass itself: a touch more blur inside, so detail behind it smooths out. */
+.glass.glass-surface--svg {
+  -webkit-backdrop-filter: var(--filter-id) blur(9px) saturate(1.6);
+  backdrop-filter: var(--filter-id) blur(9px) saturate(1.6);
+}

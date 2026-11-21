@@ -17,6 +17,26 @@ import type { Diagnosis } from '../../src/device/diagnose.ts'
 
 export type { Collections, GalleryItem, ItemDetail, Diagnosis }
 
+/** Someone found in a vault's photos. */
+export interface PersonInfo {
+  id: number
+  /** Null until someone names them. */
+  name: string | null
+  hidden: boolean
+  /** 'object': a statue, carving or drawing, hidden by itself. */
+  kind: 'person' | 'object'
+  /** Photos with them in. */
+  photos: number
+  /** A face id to show for them (mediaUrl(source, String(cover), 'face')). */
+  cover: number | null
+}
+
+export const PERSON_PREFIX = 'person:'
+export const personCollection = (id: number) => `${PERSON_PREFIX}${id}`
+export function personOf(collection: string): number | null {
+  return collection.startsWith(PERSON_PREFIX) ? Number(collection.slice(PERSON_PREFIX.length)) : null
+}
+
 /** `device:<udid>` or `vault:<id>`. */
 export type SourceId = string
 
@@ -85,6 +105,26 @@ export interface AppState {
   save: SaveState
   /** Thumbnails being made in the background, across vaults. */
   thumbnails: { done: number; total: number } | null
+  /**
+   * Search by meaning. `available` is false only when the bundled model is
+   * missing (a development build without it). `indexing` is the vault whose
+   * photos are being read for search right now, with how many are done.
+   */
+  search: {
+    available: boolean
+    /**
+     * Search and people indexing of one vault, by step: reading every photo
+     * (search by meaning, text, faces), then grouping faces into people.
+     * Null when there is nothing left to do.
+     */
+    indexing: { vault: string; step: 'reading' | 'people'; done: number; total: number } | null
+    /** Where search by meaning and text reading run: the graphics card, the processor, or not decided yet. */
+    devices: { embed: 'gpu' | 'cpu' | null; ocr: 'gpu' | 'cpu' | null }
+    /** Faces are being grouped into people (bundled models, and switched on in Settings). */
+    people: boolean
+    /** Changes when people are found, named, merged or changed. */
+    peopleRevision: number
+  }
   /** A video being made playable: copied off the phone, then converted. */
   converting: { source: SourceId; key: string; stage: 'copying' | 'converting'; progress: number | null } | null
 }
@@ -125,6 +165,11 @@ export function sameVaultName(typed: string, name: string): boolean {
   return norm(typed) !== '' && norm(typed) === norm(name)
 }
 
+/** Search results are a collection like any other, so the grid, viewer and selection all work on them. */
+export const SEARCH_PREFIX = 'search:'
+export const searchCollection = (query: string) => SEARCH_PREFIX + query.trim()
+export const searchQueryOf = (collection: string) => (collection.startsWith(SEARCH_PREFIX) ? collection.slice(SEARCH_PREFIX.length) : null)
+
 export type SaveTarget = { vault: SourceId } | { newVault: true }
 
 export interface SaveRequest {
@@ -149,6 +194,7 @@ export interface PhotosApi {
   onState(listener: (state: AppState) => void): () => void
 
   collections(source: SourceId): Promise<Collections>
+  /** A collection's items, or a search's results, best first, for `searchCollection(query)`. */
   items(source: SourceId, collection: string): Promise<GalleryItem[]>
   detail(source: SourceId, key: string): Promise<ItemDetail | null>
   /**
@@ -210,6 +256,20 @@ export interface PhotosApi {
   retryDevice(id: SourceId): Promise<void>
   /** Open the place in the browser, on OpenStreetMap. */
   openMap(lat: number, lon: number): Promise<void>
+
+  /** People in a vault: named first, then groups waiting for a name. Items: personCollection(id). */
+  people(source: SourceId, includeHidden?: boolean): Promise<PersonInfo[]>
+  person(source: SourceId, id: number): Promise<PersonInfo | null>
+  /** Name or rename; '' clears. A name someone else has merges the two, into them. */
+  namePerson(source: SourceId, id: number, name: string): Promise<{ person: number; merged: boolean }>
+  /** "Not this person": these photos leave them and are never put back. */
+  removeFromPerson(source: SourceId, id: number, keys: string[]): Promise<number>
+  /** Leave someone out of People (a stranger in the background). */
+  hidePerson(source: SourceId, id: number, hidden: boolean): Promise<void>
+  /** Groups that might be the same person as someone else, to ask about. */
+  peopleSuggestions(source: SourceId): Promise<{ person: PersonInfo; other: PersonInfo; score: number }[]>
+  /** Same merges them (into the named one); different is remembered. Returns who they are now. */
+  answerSuggestion(source: SourceId, a: number, b: number, same: boolean): Promise<number>
 }
 
 export const STATE_CHANNEL = 'photos:state'
@@ -246,6 +306,13 @@ export const INVOKE_CHANNELS = [
   'setFavourite',
   'reveal',
   'openExternally',
+  'people',
+  'person',
+  'namePerson',
+  'removeFromPerson',
+  'hidePerson',
+  'peopleSuggestions',
+  'answerSuggestion',
   'retryDevice',
   'openMap',
 ] as const satisfies readonly Exclude<keyof PhotosApi, 'onState'>[]
@@ -253,7 +320,7 @@ export const INVOKE_CHANNELS = [
 /** The custom scheme thumbnails, full images and videos are served on. */
 export const MEDIA_SCHEME = 'photos-media'
 
-export function mediaUrl(source: SourceId, key: string, what: 'sm' | 'lg' | 'ph' | 'full' | 'video' | 'motion' | 'storyboard'): string {
+export function mediaUrl(source: SourceId, key: string, what: 'sm' | 'lg' | 'ph' | 'full' | 'video' | 'motion' | 'storyboard' | 'face'): string {
   return `${MEDIA_SCHEME}://media/${encodeURIComponent(source)}/${what}/${encodeURIComponent(key)}?v=${IMAGE_CACHE_VERSION}`
 }
 

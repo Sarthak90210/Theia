@@ -17,8 +17,9 @@ describe('grid layout', () => {
     expect(l.rows).toHaveLength(5)
     expect(l.rows.every((r) => r.kind === 'tiles' && r.height === l.tile)).toBe(true)
     expect(l.rows.at(-1)).toMatchObject({ start: 20, end: 23 })
-    // 16 px padding each side, 2 px gaps.
-    expect(l.tile * 5 + 2 * 4).toBeLessThanOrEqual(1000 - 32)
+    // 12 px either side, and the gaps between.
+    expect(l.tile * 5 + l.gap * 4).toBeLessThanOrEqual(1000 - 24)
+    expect(l.tile * 5 + l.gap * 4).toBeGreaterThan(1000 - 24 - 5)
   })
 
   it('groups by the local day where the photo was taken, not UTC', () => {

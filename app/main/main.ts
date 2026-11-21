@@ -1,9 +1,11 @@
 import fs from 'node:fs'
+import os from 'node:os'
 import { execFile } from 'node:child_process'
 import path from 'node:path'
 import { app, BrowserWindow, dialog, powerMonitor, ipcMain, nativeTheme, net, powerSaveBlocker, protocol, shell } from 'electron'
 import { INVOKE_CHANNELS, MEDIA_SCHEME, STATE_CHANNEL, type AppState } from '../shared/api.ts'
 import { GalleryService } from './gallery-service.ts'
+import { windowColours } from '../shared/themes.ts'
 import { MapTiles } from './map-tiles.ts'
 import { rangeResponse } from '../../src/media/ranges.ts'
 import { preparePackagedSmoke, runPackagedSmoke } from './packaged-smoke.ts'
@@ -53,7 +55,43 @@ app.on('second-instance', () => {
   win.focus()
 })
 
+/**
+ * Windows 11 (22H2, build 22621) and later draw an acrylic material behind a
+ * window: the desktop shows through, blurred and tinted, the way glass on a
+ * Mac takes on the wallpaper. Theia lets it through the sidebar and the
+ * title bar when Liquid Glass is on. Older Windows keeps an opaque window.
+ */
+const ACRYLIC = process.platform === 'win32' && Number(os.release().split('.')[2] ?? 0) >= 22621
+
+function acrylicOn(): boolean {
+  return ACRYLIC && (service?.snapshot().settings.liquidGlass ?? true)
+}
+
+/** The window and its caption buttons in the theme's colours, at start and whenever the theme changes. */
+function themedWindow(): { bg: string; text: string; dark: boolean } {
+  const s = service?.snapshot().settings
+  const c = s ? windowColours(s.theme, s.customTheme) : { bg: '#18181a', text: '#f1f1f3' }
+  return { ...c, dark: luminanceOf(c.bg) < 0.4 }
+}
+
+function luminanceOf(hex: string): number {
+  const n = parseInt(hex.slice(1), 16)
+  return (0.2126 * ((n >> 16) & 255) + 0.7152 * ((n >> 8) & 255) + 0.0722 * (n & 255)) / 255
+}
+
+function applyWindowTheme() {
+  if (!win) return
+  const { bg, text, dark } = themedWindow()
+  // The acrylic takes its tint from the system theme: match the app's.
+  nativeTheme.themeSource = dark ? 'dark' : 'light'
+  const glass = acrylicOn()
+  win.setBackgroundMaterial(glass ? 'acrylic' : 'none')
+  win.setBackgroundColor(glass ? '#00000000' : bg)
+  win.setTitleBarOverlay({ color: glass ? '#00000000' : bg, symbolColor: text, height: TITLEBAR_HEIGHT })
+}
+
 function createWindow() {
+  const colours = themedWindow()
   win = new BrowserWindow({
     width: 1280,
     height: 820,
@@ -61,12 +99,13 @@ function createWindow() {
     minHeight: 560,
     title: 'Theia',
     icon: path.join(__dirname, 'theia-logo.png'),
-    backgroundColor: '#18181a',
+    backgroundColor: acrylicOn() ? '#00000000' : colours.bg,
+    backgroundMaterial: acrylicOn() ? 'acrylic' : 'none',
     show: false,
     // Theia draws its own title bar with a full-size logo (TitleBar.tsx).
     // Windows keeps drawing the caption buttons, in Theia's colours.
     titleBarStyle: 'hidden',
-    titleBarOverlay: { color: '#18181a', symbolColor: '#f1f1f3', height: TITLEBAR_HEIGHT },
+    titleBarOverlay: { color: acrylicOn() ? '#00000000' : colours.bg, symbolColor: colours.text, height: TITLEBAR_HEIGHT },
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -78,7 +117,9 @@ function createWindow() {
   win.removeMenu()
   win.once('ready-to-show', () => win?.show())
   win.webContents.once('did-finish-load', () => win?.show())
-  void win.loadFile(path.join(__dirname, 'renderer', 'index.html'))
+  // The window tells the page whether the desktop can show through it.
+  void win.loadFile(path.join(__dirname, 'renderer', 'index.html'), { query: { acrylic: ACRYLIC ? '1' : '0' } })
+  applyWindowTheme()
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   win.webContents.on('will-navigate', (e) => e.preventDefault())
   win.on('closed', () => (win = null))
@@ -101,6 +142,10 @@ app.whenReady().then(async () => {
     openExternal: (url) => shell.openExternal(url),
     trash: (file) => shell.trashItem(file),
     recycleBinLimit,
+    // Shipped with the app (electron-builder extraResources), never downloaded.
+    modelsDir: app.isPackaged
+      ? path.join(process.resourcesPath, 'models')
+      : path.join(app.getAppPath(), '.release-tools', 'models'),
     setBusy: (busy) => {
       if (busy && blocker === null) blocker = powerSaveBlocker.start('prevent-app-suspension')
       if (!busy && blocker !== null) {
@@ -154,6 +199,7 @@ app.whenReady().then(async () => {
       const result = await fn!.apply(service, args)
       if (['setUpProtection', 'lockVault', 'setHidden', 'remove', 'closeVault'].includes(channel)) await win?.webContents.session.clearCache()
       if (channel === 'setSettings' && !service!.mapsEnabled()) mapTiles?.cancel()
+      if (channel === 'setSettings') applyWindowTheme()
       return result
     })
   }

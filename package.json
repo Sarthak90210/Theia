@@ -1,7 +1,7 @@
 {
   "name": "theia",
   "productName": "Theia",
-  "version": "0.2.1",
+  "version": "0.5.0",
   "description": "A Windows photo library and iPhone import app",
   "author": {
     "name": "Sarthak90210",
@@ -30,7 +30,8 @@
     "release:prepare": "node scripts/prepare-release.mjs",
     "release:smoke": "node scripts/smoke-release.mjs",
     "release:dir": "npm run release:prepare && node scripts/build-app.mjs --release && electron-builder --win --x64 --dir --publish never",
-    "release:win": "npm run release:prepare && node scripts/build-app.mjs --release && electron-builder --win nsis portable --x64 --publish never"
+    "release:win": "npm run release:prepare && node scripts/build-app.mjs --release && electron-builder --win nsis portable --x64 --publish never",
+    "models": "node scripts/prepare-models.mjs"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
@@ -45,6 +46,7 @@
     "vitest": "^5.0.0"
   },
   "dependencies": {
+    "@huggingface/transformers": "4.3.2",
     "@types/plist": "^3.0.5",
     "better-sqlite3": "^13.0.3",
     "bplist-parser": "^0.3.2",

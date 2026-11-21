@@ -321,4 +321,95 @@ export const MIGRATIONS: string[] = [
   -- encrypted_path names its encrypted copy in the vault's private folder.
   ALTER TABLE file ADD COLUMN encrypted_path TEXT;
   `,
+  /* --------------------------------------------------------------- v13 */ `
+  -- Search: one image embedding per asset (src/search/index.ts). "model"
+  -- names the model, precision, image budget and vector size together, so a
+  -- different model means re-embedding, never a migration. Hidden and deleted
+  -- items have no row: a vector says what a photo shows.
+  CREATE TABLE embedding (
+    asset_id INTEGER PRIMARY KEY REFERENCES asset(id) ON DELETE CASCADE,
+    model    TEXT NOT NULL,
+    vec      BLOB NOT NULL
+  );
+  `,
+  /* --------------------------------------------------------------- v14 */ `
+  -- Search: the text read in each asset (src/search/ocr.ts), one line per
+  -- line of text, '' when there is none. Keyed by model like embedding, and
+  -- like it never kept for hidden or deleted items.
+  CREATE TABLE ocr_text (
+    asset_id INTEGER PRIMARY KEY REFERENCES asset(id) ON DELETE CASCADE,
+    model    TEXT NOT NULL,
+    text     TEXT NOT NULL
+  );
+  `,
+  /* --------------------------------------------------------------- v15 */ `
+  -- Where each line of text is, so a match can be highlighted on the photo:
+  -- JSON {w, h, lines: [{t, q, x}]}, see src/search/text.ts. NULL for rows
+  -- read before it was kept; those are read again.
+  ALTER TABLE ocr_text ADD COLUMN lines TEXT;
+  `,
+  /* --------------------------------------------------------------- v16 */ `
+  -- People (src/people/people.ts). A person is a group of faces, named or
+  -- not yet; hidden ones ("not someone I know") stay out of the People list.
+  -- Replaces the face and person tables reserved in v1, which nothing filled.
+  DROP TABLE face;
+  DROP TABLE person;
+  CREATE TABLE person (
+    id            INTEGER PRIMARY KEY,
+    name          TEXT,
+    hidden        INTEGER NOT NULL DEFAULT 0,
+    cover_face_id INTEGER,
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL
+  );
+
+  -- A face found in an asset: its box as fractions of the image, its
+  -- landmarks, how sure and how sharp, and the 128-number description that
+  -- groups it. Like the other search data, never kept for hidden or deleted
+  -- items.
+  CREATE TABLE face (
+    id         INTEGER PRIMARY KEY,
+    asset_id   INTEGER NOT NULL REFERENCES asset(id) ON DELETE CASCADE,
+    x REAL NOT NULL, y REAL NOT NULL, w REAL NOT NULL, h REAL NOT NULL,
+    landmarks  TEXT NOT NULL,
+    score      REAL NOT NULL,
+    sharpness  REAL NOT NULL,
+    vec        BLOB NOT NULL,
+    person_id  INTEGER REFERENCES person(id) ON DELETE SET NULL
+  );
+  CREATE INDEX idx_face_asset ON face(asset_id);
+  CREATE INDEX idx_face_person ON face(person_id);
+
+  -- Assets looked at for faces, with the model that looked, faces or not.
+  CREATE TABLE face_scan (
+    asset_id INTEGER PRIMARY KEY REFERENCES asset(id) ON DELETE CASCADE,
+    model    TEXT NOT NULL
+  );
+
+  -- "Not this person": grouping never puts the face back with them.
+  CREATE TABLE face_not (
+    face_id   INTEGER NOT NULL REFERENCES face(id) ON DELETE CASCADE,
+    person_id INTEGER NOT NULL REFERENCES person(id) ON DELETE CASCADE,
+    PRIMARY KEY (face_id, person_id)
+  );
+  `,
+  /* --------------------------------------------------------------- v17 */ `
+  -- kind: 'object' for a group that is a statue, carving or drawing rather
+  -- than someone (checked once per group), kept hidden so its
+  -- faces keep going to it instead of starting new groups.
+  ALTER TABLE person ADD COLUMN kind TEXT NOT NULL DEFAULT 'person';
+  ALTER TABLE person ADD COLUMN checked INTEGER NOT NULL DEFAULT 0;
+
+  -- Groups made by the first, looser grouping (0.4.0) are made again with the
+  -- stricter rules, unless someone named or hid them.
+  UPDATE face SET person_id = NULL WHERE person_id IN (SELECT id FROM person WHERE name IS NULL AND hidden = 0);
+  DELETE FROM person WHERE name IS NULL AND hidden = 0;
+
+  -- "Different people": never suggest merging these two again.
+  CREATE TABLE person_not (
+    a INTEGER NOT NULL REFERENCES person(id) ON DELETE CASCADE,
+    b INTEGER NOT NULL REFERENCES person(id) ON DELETE CASCADE,
+    PRIMARY KEY (a, b)
+  );
+  `,
 ]

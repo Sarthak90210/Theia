@@ -161,6 +161,12 @@ export interface RunOptions {
   retryBaseMs?: number
   signal?: AbortSignal
   onSettled?: (job: Job, outcome: 'done' | 'queued' | 'failed', error?: unknown) => void
+  /**
+   * Rest after each job, as a share of the time it took: 0.5 works two thirds
+   * of the time. Read after every job, so a change applies at once. Keeps
+   * long background work from holding the processor or graphics card at 100%.
+   */
+  rest?: () => number
 }
 
 /**
@@ -191,6 +197,7 @@ export async function drain(
         await sleep(Math.max(10, next - Date.now()), opts.signal)
         continue
       }
+      const started = Date.now()
       try {
         await handler(job)
         queue.complete(job.id)
@@ -199,6 +206,8 @@ export async function drain(
         const outcome = queue.fail(job, e, { maxAttempts, retryBaseMs })
         opts.onSettled?.(job, outcome, e)
       }
+      const rest = opts.rest?.() ?? 0
+      if (rest > 0) await sleep(Math.min(5000, (Date.now() - started) * rest), opts.signal)
     }
   }
 

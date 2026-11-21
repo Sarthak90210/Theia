@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import sharp from 'sharp'
+import { prepareModels } from './prepare-models.mjs'
 
 if (process.platform !== 'win32' || process.arch !== 'x64') throw new Error('Build Windows x64 releases on Windows x64.')
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -59,3 +60,6 @@ frames.forEach((frame, i) => {
 fs.mkdirSync(path.join(root, 'build'), { recursive: true })
 fs.writeFileSync(path.join(root, 'build', 'theia.ico'), Buffer.concat([header, ...frames]))
 console.log(`Prepared Windows icon and verified FFmpeg ${version} tools`)
+
+// The search model ships inside the installer.
+await prepareModels()

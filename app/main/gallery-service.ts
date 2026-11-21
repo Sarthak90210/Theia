@@ -12,7 +12,20 @@ import { JobQueue } from '../../src/jobs/queue.ts'
 import { renderThumbnails, thumbPath, type ThumbSize } from '../../src/thumbs/render.ts'
 import { queueThumbnails, runThumbnails, THUMBNAIL } from '../../src/thumbs/jobs.ts'
 import { PhoneSession, mimeOf } from '../../src/gallery/phone-session.ts'
-import { displayFile, vaultCollections, vaultDetail, vaultFiles, vaultItems } from '../../src/gallery/vault-gallery.ts'
+import { displayFile, vaultCollections, vaultDetail, vaultFiles, vaultItems, vaultItemsByIds } from '../../src/gallery/vault-gallery.ts'
+import { Embedder } from '../../src/search/embedder.ts'
+import { forgetSearchData, indexProgress, queueSearchJobs, runSearchJobs, searchVault } from '../../src/search/index.ts'
+import { OcrReader } from '../../src/search/ocr.ts'
+import { FaceReader } from '../../src/search/faces.ts'
+import { FACE_NAME } from '../../src/search/face-model.ts'
+import { MODEL_KEY } from '../../src/search/model.ts'
+import { AccelChoices } from '../../src/search/accel.ts'
+import { answerSuggestion, eraseFaces, faceBox, getPerson, hidePerson, listPeople, namePerson, personAssetIds, removeFromPerson, settlePeople, suggestions, type PersonInfo } from '../../src/people/people.ts'
+import { checkGroups } from '../../src/people/objects.ts'
+import { MODEL_NAME } from '../../src/search/model.ts'
+import { OCR_NAME } from '../../src/search/ocr-model.ts'
+import { parseQuery } from '../../src/search/query.ts'
+import { textMarks } from '../../src/search/text.ts'
 import { phoneProbeItems, phoneSaveAlbums, phoneSaveItems, vaultSaveAlbums, vaultSaveItems } from '../../src/gallery/save-sources.ts'
 import { backfillPlaceNames } from '../../src/gallery/place-backfill.ts'
 import type { Collections, GalleryItem, ItemDetail } from '../../src/gallery/types.ts'
@@ -42,8 +55,8 @@ import { editPreview } from '../../src/media/edit.ts'
 import type { EditRecipe } from '../../src/media/edit-recipe.ts'
 import { convert, planFor, probe, storyboard as makeStoryboard, type Plan, type Probe } from '../../src/media/playback.ts'
 import type { ByteSource } from '../../src/media/ranges.ts'
-import { sameVaultName, type AppState, type SaveRequest, type SaveState, type SourceId, type StoryboardInfo, type VaultDetails, type VaultInfo } from '../shared/api.ts'
-import type { AppSettings } from '../shared/settings.ts'
+import { sameVaultName, searchQueryOf, type AppState, type SaveRequest, type SaveState, type SourceId, type StoryboardInfo, type VaultDetails, type VaultInfo } from '../shared/api.ts'
+import { PACE_REST, type AppSettings } from '../shared/settings.ts'
 import { SettingsStore } from './settings.ts'
 import { folderBytes, validateVaultDeletion } from '../../src/vault/manage.ts'
 import { cleanupSavedPhone } from '../../src/gallery/run-phone-cleanup.ts'
@@ -71,6 +84,11 @@ export interface ServiceDeps {
   /** This drive's Recycle Bin limit in bytes, and whether it deletes outright. Null if unknown. */
   recycleBinLimit: (dir: string) => Promise<{ maxBytes: number; nukeOnDelete: boolean } | null>
   setBusy: (busy: boolean) => void
+  /**
+   * The bundled models' folder, holding embeddinggemma-2 (search by meaning)
+   * and ppocr (text in photos). Each kind of search is off when its model is missing.
+   */
+  modelsDir?: string | null
 }
 
 interface VaultEntry {
@@ -99,7 +117,9 @@ export class GalleryService {
   private readonly vaults = new Map<SourceId, VaultEntry>()
   private readonly registry: DeviceRegistry<PhoneSession>
   private readonly watcher = new DeviceWatcher()
-  private readonly heic = new HeicPool(Math.max(1, Math.min(os.cpus().length - 2, 6)))
+  // A quarter of the processor for HEIC decoding: thumbnails run in the
+  // background and should leave room for everything else.
+  private readonly heic = new HeicPool(Math.max(1, Math.min(Math.floor(os.cpus().length / 4), 4)))
   private readonly metadata = new ExifToolReader()
   private save: SaveState = { status: 'idle' }
   private saveAbort: AbortController | null = null
@@ -117,9 +137,52 @@ export class GalleryService {
   private readonly closingVaults = new Set<SourceId>()
   /** The thumbnail drain working on a vault now, so closing it can stop just that one. */
   private readonly thumbDrains = new Map<SourceId, { abort: AbortController; done: Promise<void> }>()
+  /** EmbeddingGemma 2 in a worker, or null when the model isn't bundled. */
+  private readonly embedder: Embedder | null
+  /** PaddleOCR in a worker, or null when the models aren't bundled. */
+  private readonly ocr: OcrReader | null
+  /** YuNet and SFace in a worker, or null when the models aren't bundled. */
+  private readonly faces: FaceReader | null
+  /** Where each model runs on this computer, as last decided. */
+  private readonly devices: AppState['search']['devices'] = { embed: null, ocr: null }
+  /** Grouping faces into people, per vault, one at a time. */
+  private readonly settling = new Map<SourceId, Promise<void>>()
+  /** Changes whenever people change, so the window reloads them. */
+  private peopleRevision = 0
+  private searchRun: Promise<void> | null = null
+  /** The vault being indexed for search now, so closing it or a thumbnail run can stop it. */
+  private searchDrain: { vault: SourceId; abort: AbortController; done: Promise<void> } | null = null
+  private searchIndexing: AppState['search']['indexing'] = null
 
   constructor(private readonly deps: ServiceDeps) {
     this.settings = new SettingsStore(deps.userData)
+    const gemma = deps.modelsDir ? path.join(deps.modelsDir, MODEL_NAME) : null
+    const ppocr = deps.modelsDir ? path.join(deps.modelsDir, OCR_NAME) : null
+    const faceDir = deps.modelsDir ? path.join(deps.modelsDir, FACE_NAME) : null
+    // The graphics card when it works and agrees with the processor, any make
+    // (WebGPU on Direct3D 12); the processor otherwise. Remembered per computer.
+    const accel = new AccelChoices(deps.userData)
+    const onDevice = (model: 'embed', key: string) => (d: { device: 'gpu' | 'cpu'; reason: string | null }) => {
+      accel.remember(model, key, d)
+      this.devices[model] = d.device
+      if (d.reason) console.warn(`${model} runs on the processor: ${d.reason}`)
+      this.publish()
+    }
+    this.embedder = gemma && Embedder.available(gemma)
+      ? new Embedder(gemma, { device: accel.device('embed', MODEL_KEY), onDevice: onDevice('embed', MODEL_KEY) })
+      : null
+    // Text and faces stay on the processor, beside the search model. ONNX
+    // Runtime's WebGPU crashes the process when two threads use it at once,
+    // and these models gain little from it (text 1.5 times, faces nothing),
+    // while the search model gains 15 times.
+    this.ocr = ppocr && OcrReader.available(ppocr)
+      ? new OcrReader(ppocr, { device: 'cpu', threads: 3 })
+      : null
+    if (this.ocr) this.devices.ocr = 'cpu'
+    this.faces = faceDir && FaceReader.available(faceDir) ? new FaceReader(faceDir) : null
+    if (faceDir && !this.faces) console.warn(`face models missing from ${faceDir}; people are off`)
+    if (gemma && !this.embedder) console.warn(`search model missing from ${gemma}; search by meaning is off`)
+    if (ppocr && !this.ocr) console.warn(`text reading models missing from ${ppocr}; search by text in photos is off`)
     this.registry = new DeviceRegistry<PhoneSession>({
       open: async (udid) => {
         const device = await AfcDevice.attach(udid)
@@ -173,6 +236,12 @@ export class GalleryService {
     this.watcher.stop()
     await this.registry.stop()
     await this.thumbnailRun?.catch(() => {})
+    this.searchDrain?.abort.abort()
+    await this.searchRun?.catch(() => {})
+    await this.embedder?.close()
+    await this.ocr?.close()
+    await Promise.all([...this.settling.values()].map((p) => p.catch(() => {})))
+    await this.faces?.close()
     await Promise.all([...this.rendering.values()].map(job => job.catch(() => {})))
     await Promise.all([...this.vaults.values()].map(v => v.privacy.catch(() => {})))
     await this.heic.close()
@@ -197,6 +266,13 @@ export class GalleryService {
       diagnosis: anyReady ? null : (this.watcher.current.diagnosis ?? null),
       save: this.save,
       thumbnails: this.thumbs,
+      search: {
+        available: !!this.embedder || !!this.ocr,
+        indexing: this.searchIndexing,
+        devices: { ...this.devices },
+        people: !!this.faces && this.settings.get().faceGrouping,
+        peopleRevision: this.peopleRevision,
+      },
       converting: this.converting,
     }
   }
@@ -206,19 +282,186 @@ export class GalleryService {
   mapsEnabled(): boolean { return this.settings.get().mapsEnabled }
 
   async setSettings(patch: Partial<AppSettings>): Promise<AppSettings> {
+    const before = this.settings.get()
     const settings = this.settings.set(patch)
+    if (before.faceGrouping && !settings.faceGrouping) {
+      // (Only face grouping being switched off erases anything: the other
+      // kinds of search keep what they read, ready if switched back on.)
+      // Off means gone: faces, groups and names, from every open vault.
+      this.searchDrain?.abort.abort()
+      await this.searchRun?.catch(() => {})
+      await Promise.all([...this.settling.values()].map((p) => p.catch(() => {})))
+      for (const v of this.vaults.values()) {
+        eraseFaces(v.vault.db)
+        fs.rmSync(path.join(v.vault.layout.cache, 'faces'), { recursive: true, force: true })
+      }
+      this.peopleRevision++
+      void this.runSearchIndex()
+    }
+    const what = (x: AppSettings) => [x.indexing, x.searchByMeaning, x.searchText, x.faceGrouping].join()
+    if (what(before) !== what(settings) && !(before.faceGrouping && !settings.faceGrouping)) {
+      // Something was switched on or off: stop, then start again with the new set.
+      this.searchDrain?.abort.abort()
+      void (this.searchRun ?? Promise.resolve()).catch(() => {}).then(() => this.runSearchIndex())
+    }
     this.publish(true)
     return settings
   }
 
+  /** How long background work rests after each photo, from the chosen pace. */
+  private rest(): number {
+    return PACE_REST[this.settings.get().indexingPace] ?? 0.5
+  }
+
+  /** The models indexing runs, from what is switched on in Settings. */
+  private stages() {
+    const s = this.settings.get()
+    if (!s.indexing) return { embed: null, ocr: null, faces: null }
+    return {
+      embed: s.searchByMeaning ? this.embedder : null,
+      ocr: s.searchText ? this.ocr : null,
+      faces: this.peopleOn() ? this.faces : null,
+    }
+  }
+
+  /* ---------------------------------------------------------------- people */
+
+  private peopleOn(): boolean {
+    const s = this.settings.get()
+    return !!this.faces && s.faceGrouping && s.indexing
+  }
+
+  private peopleVault(source: SourceId): VaultEntry {
+    const v = this.vaults.get(source)
+    if (!v) throw new Error('People are only in vaults.')
+    if (!this.peopleOn()) throw new Error('Face grouping is switched off in Settings.')
+    return v
+  }
+
+  async people(source: SourceId, includeHidden = false): Promise<PersonInfo[]> {
+    const v = this.vaults.get(source)
+    return v && this.peopleOn() ? listPeople(v.vault.db, { includeHidden: !!includeHidden }) : []
+  }
+
+  async person(source: SourceId, id: number): Promise<PersonInfo | null> {
+    const v = this.vaults.get(source)
+    return v && this.peopleOn() ? getPerson(v.vault.db, Number(id)) : null
+  }
+
+  /** Name, rename or unname someone. A name another person has merges them into that person. */
+  async namePerson(source: SourceId, id: number, name: string): Promise<{ person: number; merged: boolean }> {
+    const v = this.peopleVault(source)
+    const r = namePerson(v.vault.db, Number(id), String(name ?? ''))
+    this.peopleChanged()
+    return r
+  }
+
+  /** "Not this person" for these photos. */
+  async removeFromPerson(source: SourceId, id: number, keys: string[]): Promise<number> {
+    const v = this.peopleVault(source)
+    const n = removeFromPerson(v.vault.db, Number(id), keys.map(Number))
+    this.peopleChanged()
+    return n
+  }
+
+  /** "Same person?" questions: an unnamed group and who it might be. */
+  async peopleSuggestions(source: SourceId): Promise<{ person: PersonInfo; other: PersonInfo; score: number }[]> {
+    const v = this.vaults.get(source)
+    if (!v || !this.peopleOn()) return []
+    const all = new Map(listPeople(v.vault.db).map((p) => [p.id, p]))
+    return suggestions(v.vault.db).flatMap((s) => {
+      const person = all.get(s.person)
+      const other = all.get(s.other)
+      return person && other ? [{ person, other, score: s.score }] : []
+    })
+  }
+
+  /** The answer to "Same person?". Returns who they are now. */
+  async answerSuggestion(source: SourceId, a: number, b: number, same: boolean): Promise<number> {
+    const v = this.peopleVault(source)
+    const into = answerSuggestion(v.vault.db, Number(a), Number(b), !!same)
+    this.peopleChanged()
+    return into
+  }
+
+  async hidePerson(source: SourceId, id: number, hidden: boolean): Promise<void> {
+    const v = this.peopleVault(source)
+    hidePerson(v.vault.db, Number(id), !!hidden)
+    this.peopleChanged()
+  }
+
+  /**
+   * Everything search knows about these items, gone: vectors, text, faces,
+   * and the face pictures cut from them. For items just hidden or deleted.
+   */
+  private forgetSearchData(v: VaultEntry, ids: number[]) {
+    const faces = v.vault.db.prepare('SELECT id FROM face WHERE asset_id = ?')
+    const crops = ids.flatMap((id) => (faces.all(id) as { id: number }[]).map((f) => f.id))
+    forgetSearchData(v.vault.db, ids)
+    for (const f of crops) fs.rmSync(path.join(v.vault.layout.cache, 'faces', `${f}.webp`), { force: true })
+    if (crops.length) this.peopleChanged()
+  }
+
+  private peopleChanged() {
+    this.peopleRevision++
+    this.publish(true)
+  }
+
+  /** Group the vault's new faces into people, unless that is already happening. */
+  /**
+   * Group the vault's new faces into people, unless that is already
+   * happening. `report`: this is the last step of indexing the vault, shown
+   * in the status bar ("Grouping people"); grouping in the middle of reading
+   * photos leaves the bar on reading.
+   */
+  private settle(v: VaultEntry, report = false): Promise<void> {
+    const reader = this.faces
+    if (!reader || !this.peopleOn()) return Promise.resolve()
+    const show = (done: number, total: number) => {
+      if (!report || !this.vaults.has(v.id)) return
+      this.searchIndexing = { vault: v.vault.manifest.name, step: 'people', done, total }
+      this.publish()
+    }
+    const running = this.settling.get(v.id)
+    if (running) return report ? running.then(() => this.settle(v, true)) : running
+    show(0, 0)
+    const run = settlePeople(v.vault.db, reader)
+      .then(async (r) => {
+        if (r.joined || r.created || r.merged) this.peopleChanged()
+        // Statues, carvings, drawings: hidden before anyone is asked to name them.
+        if (this.embedder && !this.stopping) {
+          const objects = await checkGroups(v.vault.db, v.vault.layout.cache, this.embedder, { onProgress: show })
+          if (objects.length) this.peopleChanged()
+        }
+      })
+      .catch((e) => console.warn('grouping faces:', (e as Error).message))
+      .finally(() => this.settling.delete(v.id))
+    this.settling.set(v.id, run)
+    return run
+  }
+
   async collections(source: SourceId): Promise<Collections> {
     const v = this.vaults.get(source)
-    if (v) return vaultCollections(v.vault.db)
+    if (v) {
+      const c = vaultCollections(v.vault.db)
+      if (this.peopleOn()) {
+        const people = listPeople(v.vault.db)
+        c.people = { count: people.length, unnamed: people.filter((p) => p.name === null).length }
+      }
+      return c
+    }
     return this.phone(source).collections()
   }
 
   async items(source: SourceId, collection: string): Promise<GalleryItem[]> {
     const v = this.vaults.get(source)
+    const query = searchQueryOf(collection)
+    if (query !== null) return v ? this.search(v, query) : []
+    if (v && collection === 'people') return []
+    if (v && collection.startsWith('person:')) {
+      if (!this.peopleOn()) return []
+      return vaultItemsByIds(v.vault.db, personAssetIds(v.vault.db, Number(collection.slice(7))))
+    }
     if (v) return vaultItems(v.vault.db, collection)
     // Strip the phone-only fields; the window needs only the tile.
     const s = this.phone(source)
@@ -296,6 +539,7 @@ export class GalleryService {
     what: string,
     key: string,
   ): Promise<{ path: string; mime: string } | { source: ByteSource; mime: string } | null> {
+    if (what === 'face') return this.faceMedia(source, key)
     const pv = this.vaults.get(source)
     if (pv) {
       const privacy = pv.vault.db.prepare(`SELECT hidden, deleted_at FROM asset WHERE id = ?`).get(Number(key.split('~')[0])) as {hidden:number;deleted_at:number|null}|undefined
@@ -342,6 +586,35 @@ export class GalleryService {
     const shown = await s.display(key)
     if (!shown) return null
     return this.displayable(shown.path, mimeOf(shown.name), path.join(this.deps.userData, 'phones', 'full'), `${s.udid}-${safeName(shown.name)}-${key}`)
+  }
+
+  /**
+   * A face, cut square from its photo's large thumbnail with some room
+   * around it, 256 px, cached. Nothing for a face in a hidden or deleted item.
+   */
+  private async faceMedia(source: SourceId, key: string): Promise<{ path: string; mime: string } | null> {
+    const v = this.vaults.get(source)
+    if (!v || !this.peopleOn()) return null
+    const box = faceBox(v.vault.db, Number(key))
+    if (!box) return null
+    const out = path.join(v.vault.layout.cache, 'faces', `${Number(key)}.webp`)
+    if (fs.existsSync(out)) return { path: out, mime: 'image/webp' }
+    const lg = await this.vaultMedia(v, 'lg', String(box.assetId))
+    if (!lg || !('path' in lg)) return null
+    const img = sharp(await fs.promises.readFile(lg.path))
+    const { width = 0, height = 0 } = await img.metadata()
+    const side = Math.min(width, height, Math.round(Math.max(box.w * width, box.h * height) * 1.45))
+    const cx = (box.x + box.w / 2) * width
+    const cy = (box.y + box.h / 2) * height
+    const left = Math.max(0, Math.min(width - side, Math.round(cx - side / 2)))
+    const top = Math.max(0, Math.min(height - side, Math.round(cy - side / 2)))
+    if (side < 8) return null
+    const bytes = await img.extract({ left, top, width: side, height: side }).resize(256, 256).webp({ quality: 86 }).toBuffer()
+    // Hidden while it was being cut: keep nothing.
+    if (!faceBox(v.vault.db, Number(key))) return null
+    fs.mkdirSync(path.dirname(out), { recursive: true })
+    fs.writeFileSync(out, bytes)
+    return { path: out, mime: 'image/webp' }
   }
 
   private async vaultMedia(v: VaultEntry, what: string, key: string) {
@@ -664,6 +937,9 @@ export class GalleryService {
       const drain = this.thumbDrains.get(id)
       drain?.abort.abort()
       await drain?.done.catch(() => {})
+      const search = this.searchDrain?.vault === id ? this.searchDrain : null
+      search?.abort.abort()
+      await search?.done.catch(() => {})
       await v.privacy.catch(() => {})
       await Promise.all([...this.rendering.entries()].filter(([key]) => key.startsWith(`${id}:`)).map(([,job]) => job.catch(() => {})))
     } finally {
@@ -1020,6 +1296,7 @@ export class GalleryService {
     const v = this.editable(source)
     if (!v.keyFile) throw new Error(NEEDS_PROTECTION)
     const n = trashAssets(v.vault.db, keys.map(Number))
+    this.forgetSearchData(v, keys.map(Number))
     this.changed(v)
     await this.applyPrivacy(v)
     return n
@@ -1067,6 +1344,7 @@ export class GalleryService {
     if (hidden) {
       if (!v.keyFile) throw new Error(NEEDS_PROTECTION)
       const n = this.setFlag(source, keys, 'hidden', true)
+      this.forgetSearchData(v, keys.map(Number))
       await this.applyPrivacy(v)
       return n
     }
@@ -1238,8 +1516,96 @@ export class GalleryService {
   private runThumbnails(): Promise<void> {
     if (this.stopping) return Promise.resolve()
     if (this.thumbnailRun) return this.thumbnailRun
-    this.thumbnailRun = this.runThumbnailsImpl().finally(() => { this.thumbnailRun = null })
+    // Thumbnails first: the grid needs them, and search reads them. Indexing
+    // for search steps aside and picks up again when they are done.
+    this.searchDrain?.abort.abort()
+    this.thumbnailRun = this.runThumbnailsImpl().finally(() => {
+      this.thumbnailRun = null
+      void this.runSearchIndex()
+    })
     return this.thumbnailRun
+  }
+
+  /* ----------------------------------------------------------------- search */
+
+  /** Results for a typed query: dates and kinds as a filter, the rest by meaning, by text in the photo, and by place or album name. */
+  private async search(v: VaultEntry, query: string): Promise<GalleryItem[]> {
+    if (!query.trim()) return []
+    const parsed = parseQuery(query)
+    let vec: Float32Array | null = null
+    const s = this.settings.get()
+    if (this.embedder && parsed.text && s.searchByMeaning) {
+      try {
+        vec = await this.embedder.query(parsed.text)
+      } catch (e) {
+        // Text, names and dates still match without the model.
+        console.warn('search query:', (e as Error).message)
+      }
+    }
+    const hits = searchVault(v.vault.db, vec, parsed, { text: s.searchText })
+    const items = vaultItemsByIds(v.vault.db, hits.map((h) => h.assetId))
+    // Where the words are written, for the grid and the viewer to highlight.
+    if (parsed.text && s.searchText) {
+      const lines = v.vault.db.prepare(`SELECT lines FROM ocr_text WHERE asset_id = ?`)
+      for (const item of items) {
+        const row = lines.get(Number(item.key)) as { lines: string | null } | undefined
+        const marks = textMarks(row?.lines ?? null, parsed.text)
+        if (marks) item.marks = marks
+      }
+    }
+    return items
+  }
+
+  /**
+   * Read every vault's photos for search, newest first, one vault at a time.
+   * Runs after thumbnails, survives restarts (the job queue), and only ever
+   * touches visible items.
+   */
+  private runSearchIndex(): Promise<void> {
+    const stages = this.stages()
+    if ((!stages.embed && !stages.ocr && !stages.faces) || this.stopping || this.thumbnailRun) return Promise.resolve()
+    if (this.searchRun) return this.searchRun
+    this.searchRun = this.runSearchIndexImpl().finally(() => {
+      this.searchRun = null
+      this.searchIndexing = null
+      this.publish(true)
+    })
+    return this.searchRun
+  }
+
+  private async runSearchIndexImpl() {
+    const stages = this.stages()
+    try {
+      for (;;) {
+        if (this.stopping || this.thumbnailRun) return
+        const v = [...this.vaults.values()].find((x) => {
+          if (this.closingVaults.has(x.id) || this.savingVaults.has(x.id)) return false
+          return queueSearchJobs(x.vault.db, x.queue, stages) > 0
+        })
+        if (!v) return
+        const abort = new AbortController()
+        let faced = 0
+        const progress = (job?: { kind: string }) => {
+          if (!this.vaults.has(v.id)) return
+          this.searchIndexing = { vault: v.vault.manifest.name, step: 'reading', ...indexProgress(v.vault.db, stages) }
+          this.publish()
+          // People appear while the library is still being read, not only at the end.
+          if (job?.kind === 'faces' && ++faced % 250 === 0) void this.settle(v)
+        }
+        progress()
+        const done = runSearchJobs(v.vault.db, v.queue, v.vault.layout.cache, stages, { signal: abort.signal, onSettled: progress, rest: () => this.rest() })
+        this.searchDrain = { vault: v.id, abort, done }
+        try {
+          await done
+        } finally {
+          if (this.searchDrain?.done === done) this.searchDrain = null
+        }
+        if (stages.faces) await this.settle(v, true)
+        if (abort.signal.aborted) return
+      }
+    } catch (e) {
+      console.error('search indexing stopped:', (e as Error).message)
+    }
   }
 
   private async runThumbnailsImpl() {
@@ -1265,6 +1631,7 @@ export class GalleryService {
           const done = runThumbnails(v.vault.db, v.queue, v.vault.layout.media, v.vault.layout.cache, { heic: this.heic }, {
             concurrency: this.heic.size + 1,
             signal: abort.signal,
+            rest: () => this.rest(),
             onSettled: () => {
               if (!this.vaults.has(v.id)) return
               this.thumbs = { done: v.queue.counts(THUMBNAIL).done, total }

@@ -166,4 +166,25 @@ describe('drain', () => {
     expect(ran).toBe(3)
     expect(q.counts('thumbnail')).toMatchObject({ done: 3, queued: 7, running: 0 })
   })
+
+  it('rests after each job for the chosen share of its time, and stops resting when cancelled', async () => {
+    const q = new JobQueue(db)
+    for (let i = 0; i < 4; i++) q.enqueue('rest', asset(1000 + i))
+    const work = () => new Promise<void>((r) => setTimeout(r, 40))
+    let t = Date.now()
+    await drain(q, 'rest', work, { concurrency: 1, rest: () => 1 })
+    const rested = Date.now() - t
+    for (let i = 0; i < 4; i++) q.enqueue('quick', asset(2000 + i))
+    t = Date.now()
+    await drain(q, 'quick', work, { concurrency: 1, rest: () => 0 })
+    const quick = Date.now() - t
+    // Working half the time takes about twice as long.
+    expect(rested).toBeGreaterThan(quick * 1.6)
+
+    for (let i = 0; i < 4; i++) q.enqueue('cancel', asset(3000 + i))
+    const abort = new AbortController()
+    t = Date.now()
+    await drain(q, 'cancel', async () => { await work(); abort.abort() }, { concurrency: 1, rest: () => 100, signal: abort.signal })
+    expect(Date.now() - t).toBeLessThan(1000)
+  })
 })

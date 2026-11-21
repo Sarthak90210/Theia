@@ -119,6 +119,15 @@ export function vaultItems(db: Db, collectionId: string): GalleryItem[] {
   return items
 }
 
+/** Visible items by id, in the order given (a search's ranking). */
+export function vaultItemsByIds(db: Db, ids: number[]): GalleryItem[] {
+  const get = db.prepare(`SELECT ${ITEM_COLUMNS} FROM asset a WHERE a.id = ? AND ${LIVE}`)
+  const items = ids.map((id) => get.get(id) as ItemRow | undefined).filter((r): r is ItemRow => !!r).map(toItem)
+  const counts = burstFrameCounts(db, items.filter((i) => i.kind === 'burst').map((i) => Number(i.key)))
+  for (const i of items) if (i.kind === 'burst') i.frames = counts.get(Number(i.key))
+  return items
+}
+
 function toItem(r: ItemRow): GalleryItem {
   return {
     key: String(r.id),

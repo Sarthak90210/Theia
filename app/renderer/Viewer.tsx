@@ -4,6 +4,8 @@ import { VideoPlayer, type PlayerHandle } from './VideoPlayer.tsx'
 import { usePageKeys } from './use-page-keys.ts'
 import { dayLabel, timeLabel, wall } from './format.ts'
 import * as I from './icons.tsx'
+import { TextMarks } from './TextMarks.tsx'
+import { Glass } from './glass/Glass.tsx'
 
 export interface ViewerProps {
   source: SourceId
@@ -152,7 +154,7 @@ export function Viewer({ source, items, index, infoOpen, onIndex, onClose, onInf
 
   return (
     <div className="viewer" ref={root} tabIndex={0} onKeyDown={onKeyDown}>
-      <div className="viewer-bar">
+      <Glass className="viewer-bar" radius={24} bend="strong">
         <button className="ghost icon" aria-label={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'} onClick={onSidebar} title="Toggle sidebar"><I.Sidebar /></button>
         <button className="ghost icon" onClick={onClose} title="Back to the grid (Esc)">
           <I.Left />
@@ -176,7 +178,7 @@ export function Viewer({ source, items, index, infoOpen, onIndex, onClose, onInf
             <I.Info />
           </button>
         </div>
-      </div>
+      </Glass>
       <div className="viewer-stage" onContextMenu={(e) => onContextMenu?.(e, index)}>
         {isVideo ? (
           <VideoPlayer key={item.key} ref={player} source={source} item={item} converting={converting} />
@@ -309,6 +311,9 @@ function Media({ source, item, shownKey, view, onView, zoomBy }: MediaProps) {
             draggable={false}
             onLoad={() => setFull(true)}
           />
+        )}
+        {item.marks && shownKey === item.key && item.kind !== 'video' && !playMotion && (
+          <TextMarks marks={item.marks} fit="contain" className="viewer-img viewer-marks" />
         )}
         {item.kind === 'live' && playMotion && (
           <video
