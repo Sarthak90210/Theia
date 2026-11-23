@@ -15,6 +15,10 @@ const SHORTCUTS = [
     ['Ctrl+F', 'Search the vault'],
     ['Ctrl+I', 'Show or hide info'],
     ['Ctrl+R', 'Refresh the current source'],
+    ['Right click', 'Copy, share, print, open with, set as background and more'],
+    ['Ctrl+S', 'Save a copy of the photo or selection elsewhere'],
+    ['Ctrl+Shift+C', 'Copy the file path'],
+    ['F5', 'Start a slideshow'],
   ]],
   ['Grid', [
     ['Arrow keys', 'Move between photos'],
@@ -30,8 +34,14 @@ const SHORTCUTS = [
     ['Shift+Left / Right', 'Previous or next burst frame; previous or next video'],
     ['+ / - / 0', 'Zoom in, zoom out, fit photo'],
     ['I', 'Show or hide info'],
+    ['F', 'Show or hide the filmstrip'],
     ['Space', 'Play or pause video; close a photo'],
     ['Esc', 'Fit a zoomed photo, then return to the grid'],
+  ]],
+  ['Slideshow', [
+    ['Space', 'Pause or play'],
+    ['Left / Right', 'Previous or next photo'],
+    ['Esc or F5', 'End the slideshow'],
   ]],
   ['Editor', [
     ['Ctrl+Z / Ctrl+Y', 'Undo / redo'],

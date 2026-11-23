@@ -44,6 +44,17 @@ export function IndexingSettings({ settings, onChange, busy }: { settings: AppSe
         {option('searchByMeaning', 'Search by what is in them', 'Find “beach”, “temple”, “birthday cake”. Uses the graphics card when there is one.')}
         {option('searchText', 'Search the words written in them', 'Find receipts, tickets, ID cards and signs by their text.')}
         {option('faceGrouping', 'Find faces and group people', 'Name the people in your photos and search for them. Faces in hidden photos are never kept.')}
+        <label className={`setting-row ${off ? 'disabled' : ''}`}>
+          <input type="checkbox" checked={settings.deepIndexing} disabled={off} aria-disabled={busy} onChange={(e) => void onChange({ deepIndexing: e.target.checked })} />
+          <span>
+            <b>Then look again, more closely</b>
+            <span className="muted small">
+              Once every photo has been read, read each again at full resolution: smaller and turned faces, more photos of the people
+              you named (Theia asks before adding the uncertain ones), small print, and things in a corner of a photo. Several times
+              slower, in the background. Switching it off keeps what it found.
+            </span>
+          </span>
+        </label>
       </div>
       <div className={`setting-pace ${off ? 'disabled' : ''}`} role="radiogroup" aria-label="Indexing pace">
         <span className="small"><b>Pace</b></span>

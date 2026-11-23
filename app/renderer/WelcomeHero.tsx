@@ -20,7 +20,7 @@ export function WelcomeHero({ liquid, dark, onOpenVault, onSettings, onShortcuts
 }) {
   const items = [
     { icon: <I.Vault size={30} />, color: 'blue', label: 'Open a vault', onClick: onOpenVault },
-    { icon: <I.Phone size={30} />, color: 'green', label: 'Connect an iPhone', onClick: onPhone },
+    { icon: <I.Phone size={30} />, color: 'green', label: 'Connect a phone', onClick: onPhone },
     { icon: <I.Sliders size={30} />, color: 'purple', label: 'Settings', onClick: onSettings },
     { icon: <I.Info size={30} />, color: 'orange', label: 'Shortcuts', onClick: onShortcuts },
   ]
@@ -46,7 +46,7 @@ export function WelcomeHero({ liquid, dark, onOpenVault, onSettings, onShortcuts
           <h2 className="welcome-hero-title">Your photos,<br />at home.</h2>
         )}
       </div>
-      <p className="muted welcome-hero-note">Open a vault to browse your library, or connect an iPhone to start bringing your photos together.</p>
+      <p className="muted welcome-hero-note">Open a vault to browse your library, or connect an iPhone or Android phone to start bringing your photos together.</p>
       <GlassIcons
         items={items}
         size={76}

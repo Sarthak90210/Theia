@@ -412,4 +412,33 @@ export const MIGRATIONS: string[] = [
     PRIMARY KEY (a, b)
   );
   `,
+  /* --------------------------------------------------------------- v18 */ `
+  -- The closer look (src/search/deep.ts): which assets each stage has looked
+  -- at again, at full resolution, and with which model and version.
+  CREATE TABLE deep_scan (
+    asset_id INTEGER NOT NULL REFERENCES asset(id) ON DELETE CASCADE,
+    stage    TEXT NOT NULL,
+    model    TEXT NOT NULL,
+    PRIMARY KEY (asset_id, stage)
+  );
+
+  -- Search vectors of parts of a photo (its quarters and its middle), so
+  -- something small in a corner can be found. Never kept for hidden items.
+  CREATE TABLE embedding_part (
+    asset_id INTEGER NOT NULL REFERENCES asset(id) ON DELETE CASCADE,
+    model    TEXT NOT NULL,
+    part     INTEGER NOT NULL,
+    vec      BLOB NOT NULL,
+    PRIMARY KEY (asset_id, model, part)
+  );
+
+  -- A face that might be someone already named, not alike enough to add
+  -- without asking. Remade after each closer look.
+  CREATE TABLE face_maybe (
+    face_id   INTEGER PRIMARY KEY REFERENCES face(id) ON DELETE CASCADE,
+    person_id INTEGER NOT NULL REFERENCES person(id) ON DELETE CASCADE,
+    score     REAL NOT NULL
+  );
+  CREATE INDEX idx_face_maybe_person ON face_maybe(person_id);
+  `,
 ]

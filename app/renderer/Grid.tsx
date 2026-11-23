@@ -3,7 +3,7 @@ import { mediaUrl, type GalleryItem, type SourceId } from '../shared/api.ts'
 import { clock } from './format.ts'
 import * as I from './icons.tsx'
 import { TextMarks } from './TextMarks.tsx'
-import { layoutGrid, rowOf, SIDE, visibleRows, type View } from './layout.ts'
+import { layoutGrid, markAt, monthMarks, planTimeline, rowOf, SIDE, visibleRows, type MonthMark, type View } from './layout.ts'
 
 export interface GridProps {
   source: SourceId
@@ -31,7 +31,14 @@ export interface GridProps {
   /** Room under the glass toolbar above, and the glass bars below; photos scroll beneath both. */
   insetTop?: number
   insetBottom?: number
+  /** Right click on a tile. */
+  onContextMenu?: (index: number, e: React.MouseEvent) => void
+  /** A timeline of years and months beside the photos, to jump through time (items in capture order). */
+  timeline?: boolean
 }
+
+/** Room kept beside the tiles for the timeline. */
+const RAIL = 58
 
 const OVERSCAN = 800
 
@@ -67,10 +74,14 @@ export function Grid(props: GridProps) {
 
   const insetTop = props.insetTop ?? 0
   const insetBottom = props.insetBottom ?? 0
+  const wantTimeline = !!props.timeline && items.length > 1
   const layout = useMemo(
-    () => layoutGrid(items, view, width, zoom, { top: insetTop, bottom: insetBottom }),
-    [items, view, width, zoom, insetTop, insetBottom],
+    () => layoutGrid(items, view, wantTimeline ? Math.max(0, width - RAIL) : width, zoom, { top: insetTop, bottom: insetBottom }),
+    [items, view, width, zoom, insetTop, insetBottom, wantTimeline],
   )
+  const marks = useMemo(() => (wantTimeline ? monthMarks(items, layout.rows) : []), [wantTimeline, items, layout])
+  // Worth showing when there is somewhere to go: more than two screens, and more than one month.
+  const timeline = wantTimeline && marks.length > 1 && layout.height > viewport.height * 2
 
   // Keep the same item in view across zoom and resize, and start at the
   // newest photo (the bottom) like the phone does.
@@ -113,7 +124,8 @@ export function Grid(props: GridProps) {
 
   const rows = visibleRows(layout.rows, viewport.top - OVERSCAN, viewport.top + viewport.height + OVERSCAN)
   const overview = view === 'years' || view === 'months'
-  const size = layout.tile > 220 ? 'lg' : 'sm'
+  const dpr = typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1
+  const size = (layout.tile * dpr) > 320 ? 'lg' : 'sm'
 
   const ensureVisible = (index: number) => {
     const el = box.current
@@ -172,8 +184,16 @@ export function Grid(props: GridProps) {
     props.onOpen(index)
   }
 
+  const menu = (index: number, e: React.MouseEvent) => {
+    if (!props.onContextMenu || overview) return
+    e.preventDefault()
+    moveFocus(index)
+    props.onContextMenu(index, e)
+  }
+
   return (
-    <div className="grid" ref={box} onScroll={onScroll} tabIndex={0} onKeyDown={onKeyDown} aria-label="Photos">
+    <div className="grid-wrap">
+    <div className={`grid ${timeline ? 'with-timeline' : ''}`} ref={box} onScroll={onScroll} tabIndex={0} onKeyDown={onKeyDown} aria-label="Photos">
       <div className="grid-inner" style={{ height: layout.height }}>
         {rows.map((r) =>
           r.kind === 'header' ? (
@@ -208,12 +228,105 @@ export function Grid(props: GridProps) {
                   focused={focusIndex === r.start + j}
                   badges={!overview}
                   onClick={click}
+                  onMenu={menu}
                 />
               ))}
             </div>
           ),
         )}
       </div>
+    </div>
+    {timeline && (
+      <Timeline
+        marks={marks}
+        contentHeight={layout.height}
+        viewport={viewport}
+        insetTop={insetTop}
+        insetBottom={insetBottom}
+        onScrollTo={(y) => {
+          const el = box.current
+          if (el) el.scrollTop = Math.max(0, y - insetTop - 8)
+        }}
+      />
+    )}
+    </div>
+  )
+}
+
+const MONTH = new Intl.DateTimeFormat(undefined, { month: 'long', timeZone: 'UTC' })
+const monthName = (m: MonthMark) => `${MONTH.format(new Date(Date.UTC(2000, m.month, 1)))} ${m.year}`
+
+/**
+ * Years and months down the side, as tall as the whole library: a label where
+ * each year starts, a dot for each month, a bar for where the view is. Click
+ * or drag to jump; hovering says which month is there.
+ */
+function Timeline({ marks, contentHeight, viewport, insetTop, insetBottom, onScrollTo }: {
+  marks: MonthMark[]
+  contentHeight: number
+  viewport: { top: number; height: number }
+  insetTop: number
+  insetBottom: number
+  onScrollTo: (contentY: number) => void
+}) {
+  const rail = useRef<HTMLDivElement>(null)
+  const [height, setHeight] = useState(0)
+  const [hover, setHover] = useState<{ y: number; mark: MonthMark | null } | null>(null)
+  const dragging = useRef(false)
+  useLayoutEffect(() => {
+    const el = rail.current
+    if (!el) return
+    const ro = new ResizeObserver(() => setHeight(el.clientHeight))
+    ro.observe(el)
+    setHeight(el.clientHeight)
+    return () => ro.disconnect()
+  }, [])
+  const plan = useMemo(() => planTimeline(marks, contentHeight, height), [marks, contentHeight, height])
+  const railY = (contentY: number) => (contentHeight > 0 ? Math.max(0, Math.min(height, (contentY / contentHeight) * height)) : 0)
+  const point = (clientY: number) => {
+    const r = rail.current!.getBoundingClientRect()
+    const y = Math.max(0, Math.min(height, clientY - r.top))
+    return { y, contentY: height ? (y / height) * contentHeight : 0 }
+  }
+  const jump = (clientY: number) => {
+    const { y, contentY } = point(clientY)
+    const m = markAt(marks, contentY)
+    // Land on the start of the month pointed at, not part-way into it.
+    onScrollTo(m && contentY - m.top < (contentHeight / Math.max(1, height)) * 12 ? m.top : contentY)
+    setHover({ y, mark: m })
+  }
+  // Where the view is: the middle of what is on screen.
+  const here = railY(viewport.top + viewport.height / 2)
+  const span = Math.max(3, (viewport.height / Math.max(1, contentHeight)) * height)
+
+  return (
+    <div
+      className="timeline"
+      ref={rail}
+      style={{ top: insetTop + 6, bottom: insetBottom + 6 }}
+      aria-hidden="true"
+      onPointerDown={(e) => {
+        if (e.button !== 0) return
+        dragging.current = true
+        e.currentTarget.setPointerCapture(e.pointerId)
+        jump(e.clientY)
+      }}
+      onPointerMove={(e) => {
+        if (dragging.current) jump(e.clientY)
+        else {
+          const { y, contentY } = point(e.clientY)
+          setHover({ y, mark: markAt(marks, contentY) })
+        }
+      }}
+      onPointerUp={() => { dragging.current = false }}
+      onPointerCancel={() => { dragging.current = false }}
+      onPointerLeave={() => { if (!dragging.current) setHover(null) }}
+    >
+      <span className="timeline-view" style={{ top: here - span / 2, height: span }} />
+      {plan.dots.map((d) => <span key={`d${d.index}`} className="timeline-dot" style={{ top: d.y }} />)}
+      {plan.years.map((l) => <span key={`y${l.index}`} className="timeline-year" style={{ top: l.y }}>{l.year}</span>)}
+      <span className="timeline-here" style={{ top: here }} />
+      {hover?.mark && <span className="timeline-tip" style={{ top: hover.y }}>{monthName(hover.mark)}</span>}
     </div>
   )
 }
@@ -236,13 +349,14 @@ interface TileProps {
   focused: boolean
   badges: boolean
   onClick: (index: number, e: React.MouseEvent) => void
+  onMenu: (index: number, e: React.MouseEvent) => void
 }
 
 /** Rest the pointer this long on a Live Photo before it plays, so sweeping across the grid doesn't start them all. */
 const LIVE_HOVER_MS = 250
 const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
-const Tile = memo(function Tile({ source, item, index, size, left, thumb, selected, selecting, focused, badges, onClick }: TileProps) {
+const Tile = memo(function Tile({ source, item, index, size, left, thumb, selected, selecting, focused, badges, onClick, onMenu }: TileProps) {
   const [failed, setFailed] = useState(false)
   // A Live Photo plays its motion in place while the pointer rests on it,
   // muted, then settles back on the still.
@@ -264,6 +378,7 @@ const Tile = memo(function Tile({ source, item, index, size, left, thumb, select
       className={`tile ${selected ? 'selected' : ''} ${selecting ? 'selecting' : ''} ${focused ? 'focused' : ''}`}
       style={{ left, width: size, height: size }}
       onClick={(e) => onClick(index, e)}
+      onContextMenu={(e) => onMenu(index, e)}
       onPointerEnter={enter}
       onPointerLeave={leave}
       role="gridcell"

@@ -153,7 +153,8 @@ export class DeviceRegistry<S> extends EventEmitter {
   }
 }
 
-async function listUsb(): Promise<string[]> {
+/** The iPhones usbmuxd sees over USB. */
+export async function listUsb(): Promise<string[]> {
   const mux = await UsbmuxConnection.open()
   try {
     return (await mux.listDevices()).filter((d) => d.Properties.ConnectionType === 'USB').map((d) => d.Properties.SerialNumber)
@@ -162,7 +163,7 @@ async function listUsb(): Promise<string[]> {
   }
 }
 
-async function listenUsb(onEvent: (e: UsbmuxEvent) => void): Promise<void> {
+export async function listenUsb(onEvent: (e: UsbmuxEvent) => void): Promise<void> {
   const mux = await UsbmuxConnection.open()
   try {
     await mux.listen(onEvent)

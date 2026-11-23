@@ -6,10 +6,12 @@ import { Grid } from './Grid.tsx'
 import * as I from './icons.tsx'
 import { InfoPanel } from './InfoPanel.tsx'
 import type { View } from './layout.ts'
-import { SaveMenu, StatusBar } from './Save.tsx'
+import { AddPhotosMenu, SaveMenu, StatusBar } from './Save.tsx'
 import { Sidebar } from './Sidebar.tsx'
 import { Editor } from './Editor.tsx'
-import { VaultActions } from './VaultActions.tsx'
+import { ConfirmDelete, deleteItems, VaultActions } from './VaultActions.tsx'
+import { copyPaths, ItemMenu, ResizeDialog, saveCopies, type MenuTarget } from './ItemMenu.tsx'
+import { Slideshow } from './Slideshow.tsx'
 import { Viewer } from './Viewer.tsx'
 import { VaultDialog } from './VaultDialog.tsx'
 import { LockedCollection, SetUpProtection, UnlockDialog } from './Protection.tsx'
@@ -71,6 +73,21 @@ export function App() {
   const [editor, setEditor] = useState<GalleryItem | null>(null)
   const [refresh, setRefresh] = useState(0)
   const [notice, setNotice] = useState<string | null>(null)
+  /** The right-click menu, and whether it was opened in the viewer. */
+  const [menu, setMenu] = useState<(MenuTarget & { inViewer: boolean }) | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState<{ keys: string[]; action: 'remove' | 'purge' } | null>(null)
+  const [resizing, setResizing] = useState<GalleryItem | null>(null)
+  /** A slideshow running, from this item. */
+  const [slideshow, setSlideshow] = useState<{ startKey: string | null } | null>(null)
+  const [filmstrip, setFilmstripState] = useState(() => {
+    try { return localStorage.getItem('theia.filmstrip') === '1' } catch { return false }
+  })
+  const setFilmstrip = (on: boolean) => {
+    setFilmstripState(on)
+    try { localStorage.setItem('theia.filmstrip', on ? '1' : '0') } catch { /* not remembered: fine */ }
+  }
+  /** What Ctrl+S, Ctrl+Shift+C and F5 act on, kept current for the window-wide key handler. */
+  const shortcutTargets = useRef<{ keys: string[]; start: string | null }>({ keys: [], start: null })
   const [vaultDialog, setVaultDialog] = useState<SourceId | null>(null)
   /** fromAction: opened because Hide, Delete or Recover needed it, so say to try again. */
   const [protect, setProtect] = useState<{ kind: 'setup' | 'unlock'; vault: SourceId; fromAction?: boolean } | null>(null)
@@ -310,6 +327,29 @@ export function App() {
     return () => window.removeEventListener('keydown', key)
   }, [source, device?.id, editor])
 
+  // Ctrl+S (save a copy), Ctrl+Shift+C (copy as path) and F5 (slideshow), on
+  // the photo open in the viewer, else the selection, else the focused photo.
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.altKey || editor || !source || menu || slideshow) return
+      if (e.target instanceof HTMLElement && e.target.closest('input, textarea, select, [contenteditable="true"], [role="dialog"], [role="alertdialog"], [role="menu"]')) return
+      const ctrl = e.ctrlKey || e.metaKey
+      const { keys, start } = shortcutTargets.current
+      if (e.key === 'F5') {
+        e.preventDefault()
+        setSlideshow({ startKey: start })
+      } else if (ctrl && !e.shiftKey && e.key.toLowerCase() === 's' && keys.length) {
+        e.preventDefault()
+        void saveCopies(source, keys, setNotice, (m) => setNotice(cleanError(m)))
+      } else if (ctrl && e.shiftKey && e.key.toLowerCase() === 'c' && keys.length) {
+        e.preventDefault()
+        void copyPaths(source, keys, setNotice, (m) => setNotice(cleanError(m)))
+      }
+    }
+    window.addEventListener('keydown', key)
+    return () => window.removeEventListener('keydown', key)
+  }, [source, editor, menu, slideshow])
+
   if (!state) return <div className="boot"><span className="spinner" /><span>Opening Theia</span></div>
 
   const current = [...(collections?.smart ?? []), ...(collections?.albums ?? [])].find((c) => c.id === collection)
@@ -326,10 +366,26 @@ export function App() {
     setNotice(cleanError(m))
   }
   const privateCollection = collection === 'hidden' || collection === 'deleted'
+  // Shortcuts act on the open photo, else the selection, else the focused photo.
+  const viewerItem = viewer !== null ? list[viewer] ?? null : null
+  shortcutTargets.current = {
+    keys: viewerItem ? [viewerItem.key] : selected.size ? [...selected] : focusKey ? [focusKey] : [],
+    start: viewerItem?.key ?? focusKey ?? (selected.size ? [...selected][0]! : null),
+  }
+  /** The right-click menu for a photo: on the whole selection when it is part of it. */
+  const openMenu = (index: number, e: React.MouseEvent, inViewer: boolean) => {
+    const it = list[index]
+    if (!it) return
+    const targets = !inViewer && selected.has(it.key) && selected.size > 1 ? list.filter((x) => selected.has(x.key)) : [it]
+    setMenu({ items: targets, x: e.clientX, y: e.clientY, inViewer })
+  }
+  // Time runs down the timeline only where items are in capture order: not search results or hand-ordered albums.
+  const inTimeOrder = searchQuery === null && current?.kind !== 'album'
 
   let body: React.ReactNode
   if (source === DIAGNOSIS || device?.state === 'problem') {
-    body = <DiagnosisView device={device} diagnosis={state.diagnosis} />
+    // The layer checks are about Apple's connection; they say nothing about an Android phone.
+    body = <DiagnosisView device={device} diagnosis={device?.platform === 'android' ? null : state.diagnosis} />
   } else if (!source) {
     body = (
       <WelcomeHero
@@ -338,7 +394,7 @@ export function App() {
         onOpenVault={() => void openVault()}
         onSettings={() => setPreferences('settings')}
         onShortcuts={() => setPreferences('shortcuts')}
-        onPhone={() => setNotice('Plug your iPhone into this computer with a cable and unlock it. It appears in the sidebar by itself.')}
+        onPhone={() => setNotice('Plug your iPhone or Android phone into this computer with a cable and unlock it. On Android, tap the USB notification and choose File transfer. The phone appears in the sidebar by itself.')}
       />
     )
   } else if (device?.state === 'opening') {
@@ -396,6 +452,16 @@ export function App() {
       <div className="empty-symbol">{collection === 'hidden' ? <I.Hidden size={30} /> : collection === 'deleted' ? <I.Trash size={30} /> : <I.Album size={30} />}</div>
       <h2>{collection === 'hidden' ? 'No hidden items' : collection === 'deleted' ? 'Recently Deleted is empty' : 'Nothing here yet'}</h2>
       <p className="muted">{collection === 'hidden' ? 'Photos and videos you hide will appear here.' : collection === 'deleted' ? 'Deleted photos and videos will appear here, ready to recover.' : 'Photos and videos saved to this collection will appear here.'}</p>
+      {vault && collection === 'library' && (
+        <div className="dialog-buttons" style={{ marginTop: 20 }}>
+          <button className="primary" onClick={() => void addFolder(vault.id)}>
+            <I.Folder size={16} /> Add photos from folder…
+          </button>
+          <button className="ghost" onClick={() => void addFiles(vault.id)}>
+            <I.Plus size={16} /> Add photo files…
+          </button>
+        </div>
+      )}
     </div>
   } else {
     body = (
@@ -419,6 +485,8 @@ export function App() {
         onFocusKey={setFocusKey}
         insetTop={chromeH}
         insetBottom={88}
+        onContextMenu={(i, e) => openMenu(i, e, false)}
+        timeline={inTimeOrder}
       />
     )
   }
@@ -427,6 +495,24 @@ export function App() {
     try {
       const id = await window.photos.openVault()
       if (id) choose(id)
+    } catch (e) {
+      showError((e as Error).message)
+    }
+  }
+
+  async function addFolder(targetVaultId?: SourceId, deleteSources = false) {
+    try {
+      const result = await window.photos.addFolderToVault(targetVaultId ?? vault?.id, undefined, { deleteSources })
+      if (result) setNotice(addingNotice(result.count, result.vaultName, deleteSources))
+    } catch (e) {
+      showError((e as Error).message)
+    }
+  }
+
+  async function addFiles(targetVaultId?: SourceId, filePaths?: string[], deleteSources = false) {
+    try {
+      const result = await window.photos.addFilesToVault(targetVaultId ?? vault?.id, filePaths, { deleteSources })
+      if (result) setNotice(addingNotice(result.count, result.vaultName, deleteSources))
     } catch (e) {
       showError((e as Error).message)
     }
@@ -446,12 +532,28 @@ export function App() {
         onSource={choose}
         onCollection={pickCollection}
         onOpenVault={() => void openVault()}
+        onAddFolderToVault={() => void addFolder(vault?.id)}
         onVaultOptions={setVaultDialog}
         onSettings={() => setPreferences('settings')}
         onShortcuts={() => setPreferences('shortcuts')}
       />}
 
-      <main className="main" style={{ '--chrome-h': `${showToolbar && viewer === null ? chromeH : 0}px` } as React.CSSProperties}>
+      <main
+        className="main"
+        style={{ '--chrome-h': `${showToolbar && viewer === null ? chromeH : 0}px` } as React.CSSProperties}
+        onDragOver={(e) => {
+          // Files from File Explorer only, not text or a picture dragged within the window.
+          if (!vault || !e.dataTransfer.types.includes('Files')) return
+          e.preventDefault()
+          e.dataTransfer.dropEffect = 'copy'
+        }}
+        onDrop={(e) => {
+          if (!vault || !e.dataTransfer.types.includes('Files')) return
+          e.preventDefault()
+          const dropped = Array.from(e.dataTransfer.files).map((f) => window.photos.pathForFile(f)).filter((p) => !!p)
+          if (dropped.length > 0) void addFiles(vault.id, dropped)
+        }}
+      >
         <div className="stage">
           {body}
           {viewer !== null && source && items && (
@@ -471,6 +573,9 @@ export function App() {
               onInfo={() => setInfoOpen((o) => !o)}
               onSidebar={() => setSidebarOpen(open => !open)}
               sidebarOpen={sidebarOpen}
+              onContextMenu={(e, i) => openMenu(i, e, true)}
+              filmstrip={filmstrip}
+              onFilmstrip={() => setFilmstrip(!filmstrip)}
               converting={state.converting}
               onError={showError}
               frameSave={(frameKey) => <SaveMenu state={state} source={source} keys={[frameKey]} framesOnly label="Save this frame to…" onError={showError} />}
@@ -515,7 +620,7 @@ export function App() {
               </div>
             </div>
             <Glass className="glass-group toolbar-actions">
-              {device && <button className="ghost icon" aria-label="Refresh iPhone" title="Refresh iPhone" onClick={() => void window.photos.retryDevice(source!).then(() => setRefresh(n => n + 1)).catch(e => showError(e.message))}><I.Refresh /></button>}
+              {device && <button className="ghost icon" aria-label="Refresh phone" title="Refresh phone" onClick={() => void window.photos.retryDevice(source!).then(() => setRefresh(n => n + 1)).catch(e => showError(e.message))}><I.Refresh /></button>}
               {vault && privateCollection && vault.protection !== 'unlocked' ? null : selecting ? (
                 <>
                   <button className="ghost" onClick={() => (allSelected ? clearSelection() : setSelected(new Set(keysAll)))}>
@@ -527,6 +632,13 @@ export function App() {
                 </>
               ) : (
                 <>
+                  {vault && (
+                    <AddPhotosMenu
+                      disabled={state.save.status === 'running'}
+                      onAddFolder={(del) => void addFolder(vault.id, del)}
+                      onAddFiles={(del) => void addFiles(vault.id, undefined, del)}
+                    />
+                  )}
                   <button className="ghost select-toggle" onClick={() => setSelecting(true)} title="Select photos and videos">
                     Select
                   </button>
@@ -655,12 +767,64 @@ export function App() {
           <VaultDialog
             id={vaultDialog}
             onClose={() => setVaultDialog(null)}
+            onAddFolder={addFolder}
+            onAddFiles={addFiles}
             onGone={(message) => {
               if (source === vaultDialog) choose(null)
               setVaultDialog(null)
               setNotice(message)
             }}
             onError={showError}
+          />
+        )}
+        {menu && source && (
+          <ItemMenu
+            source={source}
+            target={menu}
+            vault={!!vault}
+            collection={collection}
+            inViewer={menu.inViewer}
+            filmstrip={filmstrip}
+            onFilmstrip={() => setFilmstrip(!filmstrip)}
+            onSlideshow={() => setSlideshow({ startKey: menu.items[0]?.key ?? null })}
+            onDelete={(keys, action) => setConfirmDelete({ keys, action })}
+            onResize={setResizing}
+            person={personId !== null && person ? { id: person.id, name: person.name } : null}
+            onNotice={setNotice}
+            onError={showError}
+            onClose={() => setMenu(null)}
+          />
+        )}
+        {confirmDelete && source && (
+          <ConfirmDelete
+            action={confirmDelete.action}
+            count={confirmDelete.keys.length}
+            onCancel={() => setConfirmDelete(null)}
+            onConfirm={() => {
+              const { keys, action } = confirmDelete
+              setConfirmDelete(null)
+              void deleteItems(source, keys, action, showError)
+                .then(() => {
+                  if (viewerItem && keys.includes(viewerItem.key)) setViewer(null)
+                  setRefresh((n) => n + 1)
+                  clearSelection()
+                })
+                .catch((e: Error) => showError(e.message))
+            }}
+          />
+        )}
+        {resizing && source && <ResizeDialog source={source} item={resizing} onClose={() => setResizing(null)} onNotice={setNotice} onError={showError} />}
+        {slideshow && source && items && (
+          <Slideshow
+            source={source}
+            items={items}
+            startKey={slideshow.startKey}
+            onClose={(last) => {
+              setSlideshow(null)
+              // Back where it ended: in the viewer if it started there, else scrolled to it in the grid.
+              if (last && viewer !== null) setViewerKey(last)
+              else if (last) setScrollTo(last)
+            }}
           />
         )}
         {notice && (
@@ -692,4 +856,10 @@ export function App() {
     </div>
     </GlassMode.Provider>
   )
+}
+
+function addingNotice(n: number, vaultName: string, deleteSources: boolean): string {
+  return `Adding ${count(n)} ${n === 1 ? 'item' : 'items'} to ${vaultName}. ` +
+    (deleteSources ? 'Each original goes to the Recycle Bin once it is checked in the vault. ' : '') +
+    'Progress shows at the bottom of the window.'
 }

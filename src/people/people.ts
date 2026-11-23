@@ -54,6 +54,8 @@ export function storeFaces(db: Db, assetId: number, r: FaceResult): void {
     `INSERT INTO face (asset_id, x, y, w, h, landmarks, score, sharpness, vec) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
   const scan = db.prepare(`INSERT OR REPLACE INTO face_scan (asset_id, model) VALUES (?, ?)`)
+  // The faces a closer look found go with the rest, so it looks again.
+  const deep = db.prepare(`DELETE FROM deep_scan WHERE asset_id = ? AND stage = 'faces'`)
   const W = r.width || 1
   const H = r.height || 1
   db.transaction(() => {
@@ -65,6 +67,7 @@ export function storeFaces(db: Db, assetId: number, r: FaceResult): void {
         Buffer.from(f.vec.buffer, f.vec.byteOffset, f.vec.byteLength))
     }
     scan.run(assetId, FACE_KEY)
+    deep.run(assetId)
   })()
 }
 
@@ -89,6 +92,8 @@ export function forgetFaces(db: Db, assetIds: number[]): void {
 export function eraseFaces(db: Db): void {
   db.transaction(() => {
     db.prepare(`DELETE FROM face_not`).run()
+    db.prepare(`DELETE FROM face_maybe`).run()
+    db.prepare(`DELETE FROM deep_scan WHERE stage = 'faces'`).run()
     db.prepare(`DELETE FROM face`).run()
     db.prepare(`DELETE FROM face_scan`).run()
     db.prepare(`DELETE FROM person`).run()
@@ -390,6 +395,8 @@ export interface PersonInfo {
   photos: number
   /** The face to show for them: the largest clear one. */
   cover: number | null
+  /** Photos that might be them too, waiting for a yes or no (after a closer look). */
+  maybe: number
 }
 
 /** Named people first, most photographed first; then people not yet named. */
@@ -398,9 +405,13 @@ export function listPeople(db: Db, opts: { includeHidden?: boolean } = {}): Pers
     .prepare(
       `SELECT p.id, p.name, p.hidden, p.kind,
               COUNT(DISTINCT f.asset_id) AS photos,
+              -- The face someone chose, while it is still theirs and in a visible
+              -- photo; otherwise the largest clear one.
               (SELECT f2.id FROM face f2 JOIN asset a2 ON a2.id = f2.asset_id
                 WHERE f2.person_id = p.id AND a2.hidden = 0 AND a2.deleted_at IS NULL
-                ORDER BY (f2.sharpness >= ${MIN_SHARPNESS}) DESC, f2.w * f2.h * f2.score DESC LIMIT 1) AS cover
+                ORDER BY f2.id = p.cover_face_id DESC, (f2.sharpness >= ${MIN_SHARPNESS}) DESC, f2.w * f2.h * f2.score DESC LIMIT 1) AS cover,
+              (SELECT COUNT(*) FROM face_maybe m JOIN face fm ON fm.id = m.face_id JOIN asset am ON am.id = fm.asset_id
+                WHERE m.person_id = p.id AND fm.person_id IS NULL AND am.hidden = 0 AND am.deleted_at IS NULL) AS maybe
          FROM person p
          JOIN face f ON f.person_id = p.id
          JOIN asset a ON a.id = f.asset_id AND ${VISIBLE}
@@ -409,8 +420,8 @@ export function listPeople(db: Db, opts: { includeHidden?: boolean } = {}): Pers
        HAVING photos > 0
         ORDER BY p.name IS NULL, photos DESC, p.name COLLATE NOCASE`,
     )
-    .all() as { id: number; name: string | null; hidden: number; kind: string; photos: number; cover: number | null }[]
-  return rows.map((r) => ({ id: r.id, name: r.name, hidden: r.hidden === 1, kind: r.kind === 'object' ? 'object' : 'person', photos: r.photos, cover: r.cover }))
+    .all() as { id: number; name: string | null; hidden: number; kind: string; photos: number; cover: number | null; maybe: number }[]
+  return rows.map((r) => ({ id: r.id, name: r.name, hidden: r.hidden === 1, kind: r.kind === 'object' ? 'object' : 'person', photos: r.photos, cover: r.cover, maybe: r.maybe }))
 }
 
 export function getPerson(db: Db, id: number): PersonInfo | null {
@@ -486,6 +497,40 @@ export function removeFromPerson(db: Db, personId: number, assetIds: number[]): 
 }
 
 /** Hidden people stay out of the People list; their faces keep going to them, so they do not come back as new. */
+/** This person's faces in visible photos, for choosing their picture: clearest and largest first. */
+export function personFaces(db: Db, personId: number, limit = 400): { face: number; assetId: number }[] {
+  return db
+    .prepare(
+      `SELECT f.id AS face, f.asset_id AS assetId FROM face f JOIN asset a ON a.id = f.asset_id
+        WHERE f.person_id = ? AND ${VISIBLE}
+        ORDER BY (f.sharpness >= ${MIN_SHARPNESS}) DESC, f.w * f.h * f.score DESC LIMIT ?`,
+    )
+    .all(personId, limit) as { face: number; assetId: number }[]
+}
+
+/**
+ * Show this face for the person, in People and beside their name. It must be
+ * one of their own faces, in a visible photo. Null goes back to choosing by
+ * itself (the largest clear face).
+ */
+export function setPersonCover(db: Db, personId: number, faceId: number | null): void {
+  if (faceId !== null) {
+    const ok = db
+      .prepare(`SELECT 1 FROM face f JOIN asset a ON a.id = f.asset_id WHERE f.id = ? AND f.person_id = ? AND ${VISIBLE}`)
+      .get(faceId, personId)
+    if (!ok) throw new Error('That face isn’t one of theirs any more.')
+  }
+  db.prepare(`UPDATE person SET cover_face_id = ?, updated_at = ? WHERE id = ?`).run(faceId, Date.now(), personId)
+}
+
+/** Their face in one photo: the one to use when "this photo" is chosen as their picture. */
+export function personFaceIn(db: Db, personId: number, assetId: number): number | null {
+  const row = db
+    .prepare(`SELECT id FROM face WHERE person_id = ? AND asset_id = ? ORDER BY w * h DESC LIMIT 1`)
+    .get(personId, assetId) as { id: number } | undefined
+  return row?.id ?? null
+}
+
 export function hidePerson(db: Db, id: number, hidden: boolean): void {
   // Shown again by hand: a person after all, whatever the check thought.
   db.prepare(`UPDATE person SET hidden = ?, kind = CASE WHEN ? = 0 THEN 'person' ELSE kind END, checked = 1, updated_at = ? WHERE id = ?`)

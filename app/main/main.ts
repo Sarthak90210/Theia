@@ -2,7 +2,8 @@ import fs from 'node:fs'
 import os from 'node:os'
 import { execFile } from 'node:child_process'
 import path from 'node:path'
-import { app, BrowserWindow, dialog, powerMonitor, ipcMain, nativeTheme, net, powerSaveBlocker, protocol, shell } from 'electron'
+import { app, BrowserWindow, dialog, powerMonitor, ipcMain, nativeImage, nativeTheme, net, powerSaveBlocker, protocol, shell } from 'electron'
+import { pathToFileURL } from 'node:url'
 import { INVOKE_CHANNELS, MEDIA_SCHEME, STATE_CHANNEL, type AppState } from '../shared/api.ts'
 import { GalleryService } from './gallery-service.ts'
 import { windowColours } from '../shared/themes.ts'
@@ -14,6 +15,10 @@ declare const THEIA_DEVELOPMENT: boolean
 const devHarnessDir = THEIA_DEVELOPMENT && !app.isPackaged ? process.env.PHOTOS_DEV_DIR : undefined
 const smokeDirectory = app.commandLine.getSwitchValue('theia-smoke-dir')
 if (smokeDirectory) app.setPath('userData', path.join(path.resolve(smokeDirectory), 'profile'))
+// Development only: a separate profile (its own vault list and settings), so
+// trying the app out never opens the real vaults.
+const devProfile = THEIA_DEVELOPMENT && !app.isPackaged ? process.env.THEIA_DEV_PROFILE : undefined
+if (devProfile && !smokeDirectory) app.setPath('userData', path.resolve(devProfile))
 // All existing media helpers use these names. Prefer the shipped tools only
 // inside this process, without modifying the user's system PATH.
 if (app.isPackaged) process.env.PATH = `${path.join(process.resourcesPath, 'bin')}${path.delimiter}${process.env.PATH ?? ''}`
@@ -134,6 +139,23 @@ app.whenReady().then(async () => {
       const r = await dialog.showOpenDialog(win!, { title, defaultPath, properties: ['openDirectory', 'createDirectory'] })
       return r.canceled ? null : (r.filePaths[0] ?? null)
     },
+    pickFiles: async (title, defaultPath) => {
+      const r = await dialog.showOpenDialog(win!, {
+        title,
+        defaultPath,
+        properties: ['openFile', 'multiSelections'],
+        filters: [
+          { name: 'Photos & Videos', extensions: ['jpg', 'jpeg', 'png', 'heic', 'heif', 'webp', 'gif', 'dng', 'avif', 'tif', 'tiff', 'mp4', 'mov', 'm4v', '3gp', 'mkv', 'webm'] },
+          { name: 'All Files', extensions: ['*'] },
+        ],
+      })
+      return r.canceled ? [] : r.filePaths
+    },
+    pickSavePath: async (title, defaultPath, filters) => {
+      const r = await dialog.showSaveDialog(win!, { title, defaultPath, filters, properties: ['showOverwriteConfirmation', 'createDirectory'] })
+      return r.canceled ? null : (r.filePath ?? null)
+    },
+    printImage,
     openPath: async (p) => {
       const err = await shell.openPath(p)
       if (err) throw new Error(err)
@@ -258,6 +280,35 @@ function startDevHarness(dir: string) {
       if (typeof fn === 'function') void Promise.resolve(fn.apply(service, args)).catch((e) => console.error(`[dev] ${name}`, e))
     }
   }, 300)
+}
+
+/**
+ * The Windows print dialog for one picture: a hidden page holding just the
+ * picture, fitted to the paper, turned to landscape when the picture is wide.
+ * Resolves when printing was sent or cancelled.
+ */
+async function printImage(file: string): Promise<void> {
+  const { width, height } = nativeImage.createFromPath(file).getSize()
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'theia-print-'))
+  const page = path.join(dir, 'print.html')
+  const src = pathToFileURL(file).href
+  fs.writeFileSync(page, `<!doctype html><meta charset="utf-8"><title>${path.basename(file).replace(/[<&>]/g, '')}</title>
+<style>@page { margin: 8mm } html, body { margin: 0; height: 100%; background: #fff }
+img { display: block; width: 100%; height: 100%; object-fit: contain }</style><img src="${src.replace(/"/g, '%22')}">`)
+  const printer = new BrowserWindow({ show: false, parent: win ?? undefined, webPreferences: { sandbox: true, javascript: false } })
+  try {
+    await printer.loadFile(page)
+    await new Promise<void>((resolve, reject) => {
+      printer.webContents.print({ silent: false, printBackground: true, landscape: width > height }, (ok, reason) => {
+        // Cancelling the dialog is not a failure.
+        if (ok || /cancel/i.test(reason)) resolve()
+        else reject(new Error(`The picture didn’t print: ${reason}`))
+      })
+    })
+  } finally {
+    printer.destroy()
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 }
 
 /**

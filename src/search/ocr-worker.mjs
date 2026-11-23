@@ -10,7 +10,7 @@
 
 import sharp from 'sharp'
 import { parentPort, workerData } from 'node:worker_threads'
-import { decode, loadOcr, readImage } from './ocr-core.mjs'
+import { decode, loadOcr, readImage, readImageDeep } from './ocr-core.mjs'
 
 const { modelDir, threads, scripts, device } = workerData
 
@@ -74,11 +74,11 @@ parentPort.on('message', (msg) => {
       const image = await decode(msg.file)
       let read
       try {
-        read = await readImage(ocr, image)
+        read = await (msg.deep ? readImageDeep : readImage)(ocr, image)
       } catch (e) {
         if (where !== 'gpu') throw e
         ;({ ocr } = await fallBack(e))
-        read = await readImage(ocr, image)
+        read = await (msg.deep ? readImageDeep : readImage)(ocr, image)
       }
       parentPort.postMessage({ id: msg.id, ...read })
     } catch (e) {

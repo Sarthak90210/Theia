@@ -38,7 +38,14 @@ export function DiagnosisView({ device, diagnosis }: { device: DeviceInfo | null
             ))}
           </ol>
         )}
-        {!failed && device?.error && (
+        {!failed && device?.error && device.platform === 'android' && (
+          <ol className="fix">
+            <li>Unlock the phone.</li>
+            <li>Pull down from the top of the screen, tap the USB notification, and choose File transfer.</li>
+            <li>If there's no USB notification, unplug the cable and plug it back in, or try a cable that carries data.</li>
+          </ol>
+        )}
+        {!failed && device?.error && device.platform !== 'android' && (
           <ol className="fix">
             <li>Unlock the phone and keep it on the home screen.</li>
             <li>Unplug the cable and plug it back in.</li>

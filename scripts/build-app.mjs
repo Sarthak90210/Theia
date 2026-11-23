@@ -25,6 +25,9 @@ const release = process.argv.includes('--release')
 fs.rmSync(out, { recursive: true, force: true })
 fs.mkdirSync(path.join(out, 'renderer'), { recursive: true })
 await prepareWpd(path.join(out, 'wpd'))
+// Share, Open with, desktop background and the rest of the right-click menu (src/shell/desktop.ts).
+fs.mkdirSync(path.join(out, 'shell'), { recursive: true })
+fs.copyFileSync(path.join(root, 'src/shell/desktop-helper.ps1'), path.join(out, 'shell', 'desktop-helper.ps1'))
 
 const external = ['electron', 'better-sqlite3', 'sharp', 'exiftool-vendored', 'libheif-js', '@huggingface/transformers', 'onnxruntime-node']
 

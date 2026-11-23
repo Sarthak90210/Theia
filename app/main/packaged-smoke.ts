@@ -14,6 +14,7 @@ import { OcrReader } from '../../src/search/ocr.ts'
 import { OCR_NAME } from '../../src/search/ocr-model.ts'
 import { FaceReader } from '../../src/search/faces.ts'
 import { FACE_NAME } from '../../src/search/face-model.ts'
+import { MtpBridge, mtpHelperDirectory } from '../../src/device/mtp-bridge.ts'
 
 const exec = promisify(execFile)
 const options = { windowsHide: true, timeout: 30_000, maxBuffer: 4 * 1024 * 1024 }
@@ -68,6 +69,21 @@ export async function runPackagedSmoke(root: string, win: BrowserWindow): Promis
     assert(app.isPackaged, 'Smoke check must run from a packaged app.')
     assert(path.resolve(app.getPath('userData')) === path.resolve(root, 'profile'), 'Unexpected profile directory.')
     return { packaged: app.isPackaged, resources: process.resourcesPath, profile: app.getPath('userData') }
+  })
+
+  // Starts the Windows helper Android phones are read through. No phone needed.
+  await check('Android phone helper', async () => {
+    const dir = mtpHelperDirectory()
+    assert(!!dir, 'The Android phone helper is not in the package.')
+    const bridge = MtpBridge.start()
+    try {
+      const ping = await within(bridge.call<{ version: number }>('ping'), 'Android phone helper start')
+      const devices = await within(bridge.call<unknown[]>('devices'), 'Android phone helper device list')
+      assert(Array.isArray(devices), 'The Android phone helper did not list devices.')
+      return { dir, version: ping.version, devices: devices.length }
+    } finally {
+      await bridge.close()
+    }
   })
 
   await check('native SQLite', () => {

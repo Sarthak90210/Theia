@@ -58,6 +58,13 @@ export interface SaveItem {
   edited: boolean
   subtype: string | null
   sourceUuid: string | null
+  /**
+   * Where `t` came from. 'phone' (the default) and the vault's own values are
+   * trusted as they are: a date the person corrected on the phone lives in its
+   * database, not in the file. 'filesystem' is only a file date, so the
+   * photo's own EXIF capture time replaces it when there is one.
+   */
+  timeSource?: string | null
   lat: number | null
   lon: number | null
   /** The source's name for where it was taken, kept so the vault shows the same. */
@@ -161,6 +168,9 @@ export async function saveToVault(
           result.newAssets.push(outcome.assetId)
           // Only an item with every file saved counts as saved for clean-up.
           if (!outcome.failed.length) result.assets[item.key] = outcome.assetId
+        } else if (!outcome.failed.length && outcome.dupAssetId) {
+          result.alreadyThere++
+          result.assets[item.key] = outcome.dupAssetId
         }
         result.failed.push(...outcome.failed)
       }
@@ -224,7 +234,7 @@ async function saveItem(
   finishing: () => void,
   /** The copy already in the vault that this one replaces. */
   replacing: number | null = null,
-): Promise<{ assetId: number | null; bytes: number; failed: SaveResult['failed']; replaced?: boolean }> {
+): Promise<{ assetId: number | null; bytes: number; failed: SaveResult['failed']; replaced?: boolean; dupAssetId?: number }> {
   const { db, layout } = vault
   const now = opts.now ?? Date.now
   const home = albums.find((a) => a.keys.includes(item.key))
@@ -274,7 +284,7 @@ async function saveItem(
   if (dup) {
     for (const s of staged) fs.rmSync(s.tmp, { force: true })
     linkAlbums(db, layout.media, dup.asset_id, item.key, albums, albumIds)
-    return { assetId: null, bytes: 0, failed }
+    return { assetId: null, bytes: 0, failed, dupAssetId: dup.asset_id }
   }
 
   // What the vault added to the old copy stays with the new one: its albums
@@ -324,12 +334,24 @@ async function saveItem(
 
   let assetId = 0
   db.transaction(() => {
+    // The file's own capture time replaces only a guessed one (see SaveItem.timeSource).
+    const fromFile = item.timeSource === 'filesystem' && exif?.meta.capturedUtcMs != null
+    const capturedUtc = fromFile ? exif!.meta.capturedUtcMs! : item.t
+    const capturedOffset = fromFile ? exif!.meta.capturedOffsetSeconds : item.off
+    const timeSource = fromFile ? (exif!.meta.timeSource ?? 'exif') : (item.timeSource ?? 'phone')
+    // Size and place: what the source knows, else what the file says.
+    const width = item.w ?? exif?.meta.width ?? null
+    const height = item.h ?? exif?.meta.height ?? null
+    const hasPlace = item.lat !== null && item.lon !== null
+    const lat = hasPlace ? item.lat : (exif?.meta.lat ?? null)
+    const lon = hasPlace ? item.lon : (exif?.meta.lon ?? null)
+
     const placeId =
-      item.place && item.lat !== null && item.lon !== null
+      item.place && lat !== null && lon !== null
         ? Number(
             db
               .prepare(`INSERT INTO place (country, region, city, label, lat, lon) VALUES (?, ?, ?, ?, ?, ?)`)
-              .run(item.place.country, item.place.region, item.place.city, item.place.label, item.lat, item.lon).lastInsertRowid,
+              .run(item.place.country, item.place.region, item.place.city, item.place.label, lat, lon).lastInsertRowid,
           )
         : null
     assetId = Number(
@@ -337,21 +359,22 @@ async function saveItem(
         .prepare(
           `INSERT INTO asset (kind, captured_utc, captured_offset, time_source, width, height, duration_ms,
              favourite, has_adjustments, subtype, source_uuid, lat, lon, place_id, created_at, updated_at)
-           VALUES (?, ?, ?, 'phone', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           item.kind === 'photo' ? 'still' : item.kind,
-          item.t,
-          item.off,
-          item.w,
-          item.h,
+          capturedUtc,
+          capturedOffset,
+          timeSource,
+          width,
+          height,
           item.dur,
           item.fav ? 1 : 0,
           item.edited ? 1 : 0,
           item.subtype,
           item.sourceUuid,
-          item.lat,
-          item.lon,
+          lat,
+          lon,
           placeId,
           now(),
           now(),

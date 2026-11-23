@@ -16,6 +16,7 @@ import {
   type PhoneExtras,
   type PhoneLibrary,
 } from './phone-library.ts'
+import { readAndroidLibrary, scanMedia } from './android-library.ts'
 import type { Collections, ItemDetail, ItemFile } from './types.ts'
 
 sharp.cache(false)
@@ -23,8 +24,13 @@ sharp.cache(false)
 /**
  * One connected phone, open for browsing.
  *
- * Holds its own AFC connection, separate from any save in progress, so
- * scrolling the gallery and copying files do not queue behind each other.
+ * Holds its own connection (AFC for an iPhone, MTP for Android), separate
+ * from any save in progress, so scrolling the gallery and copying files do
+ * not queue behind each other.
+ *
+ * An iPhone's gallery comes from its Photos database. An Android phone's
+ * comes from its photo folders (see android-library.ts): no favourites,
+ * edits, Hidden album or Recently Deleted, one item per file.
  *
  * Everything fetched is cached per phone under `cacheRoot/<udid>/`: the Photos
  * database copy, thumbnails, and originals opened in the viewer. Nothing in
@@ -33,11 +39,17 @@ sharp.cache(false)
 
 const PHOTOS_DB = '/PhotoData/Photos.sqlite'
 const MAX_OPEN_FILES = 8
+/** An Android video with no preview of its own is copied to make one only up to this size. */
+const ANDROID_VIDEO_THUMB_MAX = 200 * 1024 * 1024
+
+export type PhonePlatform = 'iphone' | 'android'
 
 export interface PhoneSessionOptions {
   device: DeviceSource
   udid: string
   name: string
+  /** iphone when left out. */
+  platform?: PhonePlatform
   cacheRoot: string
   heic: Pick<HeicPool, 'decode'>
   metadata?: MetadataReader
@@ -53,6 +65,14 @@ export interface PhoneSessionOptions {
 }
 
 /** The connection to the phone is gone and a new one could not be made. */
+/** An MTP device with storage but none of the folders photos live in: not a phone or camera. */
+export class NoPhotoFoldersError extends Error {
+  constructor() {
+    super('This device has no photo folders.')
+    this.name = 'NoPhotoFoldersError'
+  }
+}
+
 export class PhoneLostError extends Error {
   constructor(message: string) {
     super(message)
@@ -63,6 +83,7 @@ export class PhoneLostError extends Error {
 export class PhoneSession {
   readonly udid: string
   readonly name: string
+  readonly platform: PhonePlatform
   library!: PhoneLibrary
   /** Every file in /DCIM by directory, lower-cased names, for "is it on the phone" and siblings. */
   private dcim = new Map<string, string[]>()
@@ -83,6 +104,7 @@ export class PhoneSession {
     this.device = opts.device
     this.udid = opts.udid
     this.name = opts.name
+    this.platform = opts.platform ?? 'iphone'
     this.dir = path.join(opts.cacheRoot, opts.udid.replace(/[^\w-]/g, '_'))
   }
 
@@ -95,6 +117,7 @@ export class PhoneSession {
   /** Copy the Photos database and list /DCIM. A few seconds for thousands of photos. */
   async load(): Promise<void> {
     fs.mkdirSync(this.dir, { recursive: true })
+    if (this.platform === 'android') return this.loadAndroid()
     // The copy in use stays open, and Windows refuses to delete an open file.
     // Each load gets a fresh folder; older ones go once nothing holds them.
     const dbDir = fs.mkdtempSync(path.join(this.dir, 'db-'))
@@ -132,6 +155,26 @@ export class PhoneSession {
     }
   }
 
+  /** List the phone's photo folders. Seconds for thousands of files; the phone does the work. */
+  private async loadAndroid(): Promise<void> {
+    const scan = await this.io((d) => scanMedia(d))
+    if (!scan.storages.length) {
+      throw new Error("The phone isn't sharing its files. Unlock it, then tap the USB notification and choose File transfer.")
+    }
+    if (!scan.folders) throw new NoPhotoFoldersError()
+    const dirs = new Map<string, string[]>()
+    for (const f of scan.files) {
+      const dir = path.posix.dirname(f.path)
+      const names = dirs.get(dir) ?? []
+      names.push(path.posix.basename(f.path))
+      dirs.set(dir, names)
+      this.sizes.set(f.path, f.size)
+    }
+    this.library = readAndroidLibrary(scan.files)
+    this.dcim = dirs
+    this.privateKeys = null
+  }
+
   onPhone(devicePath: string): boolean {
     return onDcim(this.dcim, devicePath)
   }
@@ -156,6 +199,8 @@ export class PhoneSession {
   filesFor(key: string): string[] {
     const a = this.asset(key)
     if (!a || a.cloud) return []
+    // Android keeps an edit, a motion photo's video and the rest inside the one file.
+    if (this.platform === 'android') return this.onPhone(a.path) ? [a.path] : []
     const dir = path.posix.dirname(a.path)
     const stem = path.posix.basename(a.filename, path.posix.extname(a.filename))
     const m = /^([A-Za-z]+_)(\d+)$/.exec(stem)
@@ -344,6 +389,8 @@ export class PhoneSession {
     const extras = this.extras(key)
     let camera: ItemDetail['camera'] = extras?.camera ?? null
     let exposure: ItemDetail['exposure'] = extras?.exposure ?? null
+    // Android keeps no location outside the file, so it comes from the photo here.
+    let fileLocation: { lat: number; lon: number } | null = null
     if (!camera && this.opts.metadata && a.kind !== 'video' && !a.cloud) {
       const local = await this.original(key)
       if (local) {
@@ -359,6 +406,7 @@ export class PhoneSession {
             ev: null,
             zoom: null,
           }
+          if (meta.lat !== null && meta.lon !== null) fileLocation = { lat: meta.lat, lon: meta.lon }
         } catch {
           /* the info panel shows what it has */
         }
@@ -379,7 +427,11 @@ export class PhoneSession {
       exposure,
       video: a.kind === 'video' ? (extras?.video ?? null) : null,
       location:
-        a.lat !== null && a.lon !== null ? { lat: a.lat, lon: a.lon, altitude: null, place: extras?.place?.label ?? null } : null,
+        a.lat !== null && a.lon !== null
+          ? { lat: a.lat, lon: a.lon, altitude: null, place: extras?.place?.label ?? null }
+          : fileLocation
+            ? { ...fileLocation, altitude: null, place: null }
+            : null,
       caption: extras?.caption ?? null,
       favourite: a.fav,
       edited: a.edited,
@@ -466,6 +518,26 @@ export class PhoneSession {
     if (fs.existsSync(out)) return out
     fs.mkdirSync(path.dirname(out), { recursive: true })
 
+    // Android: the phone's own preview for the blurred placeholder and for
+    // videos, which would otherwise be copied whole to make a tile. Stills
+    // render from the original, like the iPhone's, because the phone's
+    // previews are often only a few hundred pixels across.
+    if (this.platform === 'android' && (size === 'ph' || a.kind === 'video')) {
+      const preview = await this.phonePreview(a)
+      if (preview) {
+        const spec = SIZES[size]
+        let img = sharp(preview).rotate().resize(spec.edge, spec.edge, { fit: 'inside', withoutEnlargement: true })
+        if (size === 'ph') img = img.blur(1.2)
+        try {
+          fs.writeFileSync(out, await img.webp({ quality: spec.quality }).toBuffer())
+          return out
+        } catch {
+          /* not a picture after all: make one from the file */
+        }
+      }
+      if (a.kind === 'video' && (await this.size(a.path).catch(() => Infinity)) > ANDROID_VIDEO_THUMB_MAX) return null
+    }
+
     // Local stills use the same edited/original source as the viewer. Phone
     // previews can be tiny and have different tone mapping. Keep previews
     // for videos and cloud assets whose originals are unavailable.
@@ -506,6 +578,7 @@ export class PhoneSession {
    */
   private async phonePreview(a: PhoneAsset): Promise<Buffer | null> {
     if (this.phoneThumbs === false) return null
+    if (this.platform === 'android') return this.androidPreview(a)
     const dir = `/PhotoData/Thumbnails/V2/${a.directory}/${a.filename}`
     // Every folder uses the same file name for its largest preview, so after
     // the first hit open it directly: one round trip instead of a listing and
@@ -539,6 +612,17 @@ export class PhoneSession {
       if (this.phoneThumbs === null && ++this.previewMisses >= 20) this.phoneThumbs = false
       return null
     }
+  }
+
+  /** What the phone itself shows in its file browser, when it has made one. */
+  private async androidPreview(a: PhoneAsset): Promise<Buffer | null> {
+    const bytes = await this.withFile(() => this.io((d) => (d.thumbnail ? d.thumbnail(a.path) : Promise.resolve(null))))
+    if (bytes?.length) {
+      this.phoneThumbs = true
+      return bytes
+    }
+    if (this.phoneThumbs === null && ++this.previewMisses >= 20) this.phoneThumbs = false
+    return null
   }
 
   private readAll(devicePath: string): Promise<Buffer> {
@@ -637,9 +721,18 @@ const MIME: Record<string, string> = {
   '.png': 'image/png',
   '.gif': 'image/gif',
   '.dng': 'image/x-adobe-dng',
+  '.webp': 'image/webp',
+  '.avif': 'image/avif',
+  '.tif': 'image/tiff',
+  '.tiff': 'image/tiff',
   '.mov': 'video/quicktime',
   '.mp4': 'video/mp4',
+  '.m4v': 'video/mp4',
+  '.3gp': 'video/3gpp',
+  '.mkv': 'video/x-matroska',
+  '.webm': 'video/webm',
   '.aae': 'application/xml',
+  '.xmp': 'application/xml',
 }
 
 export function mimeOf(name: string): string {

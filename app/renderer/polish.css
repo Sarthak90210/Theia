@@ -30,7 +30,7 @@ button, input { -webkit-tap-highlight-color: transparent; }
 button { min-height: 34px; border-radius: 10px; padding: 6px 12px; transition: background .16s, box-shadow .16s, color .16s; }
 /* Press feedback by dimming. A transform here would replace the transform
    that centres some buttons (viewer arrows, the big play button) and make them jump. */
-button:active:not(:disabled) { filter: brightness(0.88); }
+button:active:not(:disabled) { opacity: 0.82; }
 button:disabled { opacity: .44; }
 button.primary { font-weight: 600; box-shadow: 0 1px 3px rgb(0 0 0 / 10%); }
 button.primary:hover:not(:disabled) { filter: none; opacity: .87; }
@@ -121,6 +121,7 @@ h3 { text-transform: none; font-size: 12px; letter-spacing: 0; }
 .app.with-info .viewer-bar .save-label { display: none; }
 .viewer-actions .fav { color: var(--text); }
 .viewer-photo .viewer-img { top: 88px; height: calc(100% - 112px); }
+.viewer-layer { will-change: auto; }
 .viewer-bar .vault-actions { gap: 2px; }
 .nav { border-radius: 50%; width: 40px; height: 40px; min-height: 40px; backdrop-filter: blur(18px); background: rgb(32 32 37 / 65%); border: 1px solid #ffffff1a; }
 .nav:focus-visible, .viewer-stage:focus-within .nav { opacity: 1; }
@@ -149,16 +150,20 @@ h3 { text-transform: none; font-size: 12px; letter-spacing: 0; }
 .info-actions .save-label { overflow: hidden; text-overflow: ellipsis; }
 .chip, .flag { background: var(--accent-soft); color: var(--muted); font-weight: 500; }
 .map-foot { color: var(--text); }
-.menu { background: var(--glass-strong); border: 1px solid var(--glass-border); border-radius: 16px; padding: 6px; box-shadow: var(--glass-edge), var(--shadow); min-width: 240px; max-width: min(320px, calc(100vw - 32px)); }
+.menu { background: var(--glass-strong); border: 1px solid var(--glass-border); border-radius: 16px; padding: 6px; box-shadow: var(--glass-edge), var(--shadow); min-width: 240px; max-width: min(320px, calc(100vw - 32px)); display: flex; flex-direction: column; white-space: normal; }
 .menu-heading { padding: 10px 10px 8px; font-size: 11px; }
 .save-cleanup-choice { display: flex; gap: 9px; align-items: flex-start; padding: 10px; font-size: 12px; border-bottom: 1px solid var(--line); cursor: pointer; }
 .save-cleanup-choice input { flex: 0 0 auto; margin-top: 2px; accent-color: var(--accent); }
-.menu-item { padding: 9px 10px; border-radius: 10px; min-height: 36px; }
+.menu-item { padding: 9px 10px; border-radius: 10px; min-height: 36px; display: flex; align-items: center; width: 100%; box-sizing: border-box; }
 .menu-item:hover, .menu-item:focus-visible { background: var(--accent-soft); }
-.menu-item span { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.menu-item span { min-width: 0; white-space: nowrap; }
+.menu-item span:nth-child(2) { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; margin: 0 8px; }
 .status { border: 0; min-height: 38px; padding: 8px 26px 12px; font-size: 11px; }
 .status .small { font-size: 11px; }
-.status-save { flex-wrap: wrap; gap: 8px 12px; }
+.status-save { flex-wrap: nowrap; gap: 8px 12px; align-items: center; min-width: 0; }
+.status-save > span:first-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex-shrink: 1; }
+.status-save .bar, .status-save .status-eta, .status-save button { flex-shrink: 0; }
+.status-save .current { flex: 0 1 140px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .status-thumbs { max-width: 100%; flex-wrap: wrap; }
 .bar { background: var(--line); height: 4px; }
 .bar > span { background: var(--text); }
@@ -399,6 +404,27 @@ form.person-title { max-width: 460px; }
 .same-faces { display: flex; justify-content: center; gap: 18px; }
 .same-faces .who-face { display: flex; flex-direction: column; align-items: center; gap: 6px; color: var(--muted); border-radius: 12px; }
 .same-buttons { display: flex; gap: 8px; justify-content: center; }
+.maybe-count { text-align: center; }
+.look-closer { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; max-width: 560px; }
+.maybe-dialog { width: min(100% - 32px, 720px); max-width: 720px; max-height: min(86vh, 760px); display: flex; flex-direction: column; gap: 14px; padding: 22px; border-radius: 22px; background: var(--glass-strong, var(--surface)); border: 1px solid var(--glass-border, var(--line)); box-shadow: var(--shadow); }
+.maybe-head { display: flex; gap: 12px; align-items: center; }
+.maybe-head h2 { font-size: 18px; font-weight: 600; margin: 0 0 2px; }
+.maybe-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(124px, 1fr)); grid-auto-rows: max-content; gap: 10px; overflow-y: auto; min-height: 0; padding: 2px; }
+.maybe-tile { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 10px 8px 8px; border-radius: 14px; background: var(--surface); border: 1px solid var(--line); transition: border-color .15s, background .15s, opacity .15s; }
+.maybe-tile.yes { border-color: var(--accent); background: var(--accent-soft); }
+.maybe-tile.no { opacity: .55; }
+.maybe-photo { width: 100%; height: 64px; object-fit: cover; border-radius: 8px; background: var(--line); }
+.maybe-buttons { display: flex; gap: 6px; }
+.maybe-buttons button { min-height: 28px; padding: 2px 12px; }
+.maybe-dialog .dialog-buttons { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+/* Rows as tall as their faces: in a dialog of limited height, auto rows would
+   otherwise be squeezed to fit, piling the faces on top of each other. */
+.cover-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); grid-auto-rows: max-content; gap: 8px; overflow-y: auto; min-height: 0; padding: 4px; }
+.cover-choice { display: grid; place-items: center; justify-self: center; width: 100px; height: 100px; padding: 6px; border-radius: 50%; background: transparent; border: 2px solid transparent; }
+.cover-choice:hover:not(:disabled), .cover-choice:focus-visible { background: var(--accent-soft); outline: none; }
+.cover-choice.on { border-color: var(--accent); }
+.person-cover-button { padding: 0; min-height: 0; border-radius: 50%; background: transparent; border: 0; display: inline-flex; }
+.person-cover-button:hover { filter: brightness(1.1); }
 
 /* The sidebar is a rounded panel; it scrolls inside, so the scrollbar keeps clear of the corners. */
 .sidebar { overflow: hidden; display: flex; flex-direction: column; padding: 0; }

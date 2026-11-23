@@ -88,6 +88,77 @@ export async function readImage(ocr, image) {
   return { width: image.width, height: image.height, lines }
 }
 
+/**
+ * The closer look: the whole image as usual, then overlapping tiles of it,
+ * each found at nearly its own resolution. Whole, a 3200 px photo is shrunk
+ * to 960 px to find text, and small print vanishes; a 1280 px tile loses
+ * little. Lines found twice (by the whole and a tile, or two tiles) are kept
+ * once: the longer reading.
+ */
+export async function readImageDeep(ocr, image) {
+  const whole = await readImage(ocr, image)
+  const lines = [...whole.lines]
+  for (const [ox, oy, w, h] of tiles(image.width, image.height, DEEP_TILE, DEEP_OVERLAP)) {
+    if (w === image.width && h === image.height) continue
+    const part = await readImage(ocr, crop(image, ox, oy, w, h))
+    for (const l of part.lines) lines.push({ ...l, box: l.box.map(([x, y]) => [x + ox, y + oy]) })
+  }
+  return { width: image.width, height: image.height, lines: mergeLines(lines).slice(0, DEEP_MAX_LINES) }
+}
+
+const DEEP_TILE = 1280
+const DEEP_OVERLAP = 192
+const DEEP_MAX_LINES = 300
+
+/** Top-left corners and sizes of `size` tiles covering w x h, overlapping by at least `overlap`. */
+export function tiles(w, h, size, overlap) {
+  const starts = (n) => {
+    if (n <= size) return [0]
+    const count = Math.ceil((n - overlap) / (size - overlap))
+    const step = (n - size) / (count - 1)
+    return Array.from({ length: count }, (_, i) => Math.round(i * step))
+  }
+  const out = []
+  for (const y of starts(h)) for (const x of starts(w)) out.push([x, y, Math.min(size, w), Math.min(size, h)])
+  return out
+}
+
+function crop(image, ox, oy, w, h) {
+  const { data, width, channels } = image
+  const out = Buffer.alloc(w * h * channels)
+  for (let y = 0; y < h; y++) data.copy(out, y * w * channels, ((oy + y) * width + ox) * channels, ((oy + y) * width + ox + w) * channels)
+  return { data: out, width: w, height: h, channels }
+}
+
+function bounds(line) {
+  const xs = line.box.map((p) => p[0]), ys = line.box.map((p) => p[1])
+  return { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) }
+}
+
+/**
+ * One reading per place: of lines whose boxes mostly overlap (the smaller is
+ * at least half covered), the one with more letters and digits, then the more
+ * confident. Top to bottom, then left to right.
+ */
+export function mergeLines(lines) {
+  const letters = (l) => l.text.match(/[\p{L}\p{N}]/gu)?.length ?? 0
+  const ranked = [...lines].sort((a, b) => letters(b) - letters(a) || b.conf - a.conf)
+  const kept = []
+  for (const l of ranked) {
+    const a = bounds(l)
+    const areaA = Math.max(1, (a.x1 - a.x0) * (a.y1 - a.y0))
+    const dup = kept.some((k) => {
+      const b = bounds(k)
+      const iw = Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0), ih = Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0)
+      if (iw <= 0 || ih <= 0) return false
+      const areaB = Math.max(1, (b.x1 - b.x0) * (b.y1 - b.y0))
+      return (iw * ih) / Math.min(areaA, areaB) >= 0.5
+    })
+    if (!dup) kept.push(l)
+  }
+  return kept.sort((a, b) => bounds(a).y0 - bounds(b).y0 || bounds(a).x0 - bounds(b).x0)
+}
+
 /* --------------------------------------------------------------- detection */
 
 async function detect(session, image) {

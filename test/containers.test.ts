@@ -65,6 +65,29 @@ describe('still structure', () => {
     expect(r.detail).toMatch(/EOI|truncated/)
   })
 
+  it('accepts data after the end marker: Samsung trailers, Motion Photo videos', () => {
+    // Samsung Gallery appends its metadata after the image, ending "SEFT".
+    // Three real photos were refused as truncated for this.
+    const samsung = Buffer.concat([makeJpeg(), Buffer.from('\x00\x00SEFH image_utc_data 1749759652760 SEFT', 'latin1')])
+    const r = checkStructureBuffer(samsung)
+    expect(r.ok).toBe(true)
+    expect(r.detail).toMatch(/after the end of the image/)
+    // A whole video after it, with the end marker past the first read chunk.
+    const motion = Buffer.concat([makeJpeg({ scanBytes: 1024 * 1024 + 7 }), Buffer.alloc(3 * 1024 * 1024, 0x11)])
+    expect(checkStructureBuffer(motion).ok).toBe(true)
+    // An end marker split across two 1 MB chunks is still found: the scan data
+    // starts at byte 34, so its FF is the last byte of the first chunk.
+    const split = makeJpeg({ scanBytes: 1024 * 1024 - 1 })
+    expect(split[34 + 1024 * 1024 - 1]).toBe(0xff)
+    expect(checkStructureBuffer(Buffer.concat([split, Buffer.from('trailer')])).ok).toBe(true)
+  })
+
+  it('still rejects a JPEG cut off before its end marker, trailer or not', () => {
+    const cut = makeJpeg({ eoi: false })
+    expect(checkStructureBuffer(cut).ok).toBe(false)
+    expect(checkStructureBuffer(Buffer.concat([cut, Buffer.from('SEFT', 'latin1')])).ok).toBe(false)
+  })
+
   it('rejects a JPEG whose segment runs past the end of the file', () => {
     const j = makeJpeg()
     j.writeUInt16BE(0x7000, 4) // APP0 claims 28KB of payload

@@ -25,6 +25,12 @@ export interface AppSettings {
    * only; switching it off erases faces, groups and names from open vaults.
    */
   faceGrouping: boolean
+  /**
+   * Once everything has been read, read every photo again more closely, at
+   * full resolution: smaller and turned faces, small print, things in a corner
+   * of the picture. Several times slower; nothing is lost by switching it off.
+   */
+  deepIndexing: boolean
   indexingPace: IndexingPace
   theme: ThemeId
   customTheme: CustomTheme
@@ -46,6 +52,7 @@ export const DEFAULT_SETTINGS: Readonly<AppSettings> = {
   searchByMeaning: true,
   searchText: true,
   faceGrouping: true,
+  deepIndexing: false,
   indexingPace: 'balanced',
   theme: 'theia-dark',
   customTheme: DEFAULT_CUSTOM_THEME,
@@ -66,6 +73,7 @@ export function validSetting(key: string, value: unknown): boolean {
     case 'searchByMeaning':
     case 'searchText':
     case 'faceGrouping':
+    case 'deepIndexing':
     case 'liquidGlass':
     case 'setupDone':
       return typeof value === 'boolean'

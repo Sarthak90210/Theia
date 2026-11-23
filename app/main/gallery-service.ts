@@ -4,23 +4,26 @@ import os from 'node:os'
 import path from 'node:path'
 import sharp, { type Sharp } from 'sharp'
 import { AfcDevice } from '../../src/device/afc-device.ts'
-import { DeviceRegistry } from '../../src/device/registry.ts'
+import { DeviceRegistry, listenUsb, listUsb } from '../../src/device/registry.ts'
+import { AndroidPhones, isAndroidId } from '../../src/device/mtp-device.ts'
 import { DeviceWatcher } from '../../src/device/watcher.ts'
 import { HeicPool } from '../../src/thumbs/heic-pool.ts'
 import { ExifToolReader } from '../../src/metadata/reader.ts'
 import { JobQueue } from '../../src/jobs/queue.ts'
-import { renderThumbnails, thumbPath, type ThumbSize } from '../../src/thumbs/render.ts'
+import { openSource, renderThumbnails, thumbPath, type ThumbSize } from '../../src/thumbs/render.ts'
 import { queueThumbnails, runThumbnails, THUMBNAIL } from '../../src/thumbs/jobs.ts'
-import { PhoneSession, mimeOf } from '../../src/gallery/phone-session.ts'
+import { NoPhotoFoldersError, PhoneSession, mimeOf } from '../../src/gallery/phone-session.ts'
 import { displayFile, vaultCollections, vaultDetail, vaultFiles, vaultItems, vaultItemsByIds } from '../../src/gallery/vault-gallery.ts'
 import { Embedder } from '../../src/search/embedder.ts'
 import { forgetSearchData, indexProgress, queueSearchJobs, runSearchJobs, searchVault } from '../../src/search/index.ts'
+import { deepProgress, queueDeep, runDeep, type DeepStages } from '../../src/search/deep.ts'
+import { answerMaybes, findMaybes, listMaybes } from '../../src/people/maybe.ts'
 import { OcrReader } from '../../src/search/ocr.ts'
 import { FaceReader } from '../../src/search/faces.ts'
 import { FACE_NAME } from '../../src/search/face-model.ts'
 import { MODEL_KEY } from '../../src/search/model.ts'
 import { AccelChoices } from '../../src/search/accel.ts'
-import { answerSuggestion, eraseFaces, faceBox, getPerson, hidePerson, listPeople, namePerson, personAssetIds, removeFromPerson, settlePeople, suggestions, type PersonInfo } from '../../src/people/people.ts'
+import { answerSuggestion, eraseFaces, faceBox, getPerson, hidePerson, listPeople, namePerson, personAssetIds, personFaceIn, personFaces, removeFromPerson, setPersonCover, settlePeople, suggestions, type PersonInfo } from '../../src/people/people.ts'
 import { checkGroups } from '../../src/people/objects.ts'
 import { MODEL_NAME } from '../../src/search/model.ts'
 import { OCR_NAME } from '../../src/search/ocr-model.ts'
@@ -55,7 +58,7 @@ import { editPreview } from '../../src/media/edit.ts'
 import type { EditRecipe } from '../../src/media/edit-recipe.ts'
 import { convert, planFor, probe, storyboard as makeStoryboard, type Plan, type Probe } from '../../src/media/playback.ts'
 import type { ByteSource } from '../../src/media/ranges.ts'
-import { sameVaultName, searchQueryOf, type AppState, type SaveRequest, type SaveState, type SourceId, type StoryboardInfo, type VaultDetails, type VaultInfo } from '../shared/api.ts'
+import { sameVaultName, searchQueryOf, type AppState, type MaybeFace, type SaveRequest, type SaveState, type SourceId, type StoryboardInfo, type VaultDetails, type VaultInfo } from '../shared/api.ts'
 import { PACE_REST, type AppSettings } from '../shared/settings.ts'
 import { SettingsStore } from './settings.ts'
 import { folderBytes, validateVaultDeletion } from '../../src/vault/manage.ts'
@@ -63,7 +66,10 @@ import { cleanupSavedPhone } from '../../src/gallery/run-phone-cleanup.ts'
 import { wpdInventory, wpdHashObject, wpdDeleteVerified } from '../../src/device/wpd.ts'
 import { checkCleanupDecode } from '../../src/verify/cleanup-decode.ts'
 import type { DeviceSource } from '../../src/device/types.ts'
-import type { SaveItem } from '../../src/vault/save.ts'
+import type { SaveAlbum, SaveItem } from '../../src/vault/save.ts'
+import { scanFolderForImport, scanPathsForImport } from '../../src/vault/import-folder.ts'
+import { recycleImportedSources } from '../../src/vault/source-cleanup.ts'
+import { chooseApp, copyFiles, openWithChoices, runShellCommand, setLockScreen, setWallpaper, shareFiles, shellCommands, type AppChoice } from '../../src/shell/desktop.ts'
 
 sharp.cache(false)
 
@@ -72,10 +78,21 @@ sharp.cache(false)
  * (dialogs, the shell) come in through ServiceDeps.
  */
 
+/** Adding photos from a folder on this computer. */
+export interface ImportOptions {
+  /** Move each original to the Recycle Bin once it is checked to be in the vault (src/vault/source-cleanup.ts). */
+  deleteSources?: boolean
+}
+
 export interface ServiceDeps {
   userData: string
   publish: (state: AppState) => void
   pickFolder: (title: string, defaultPath?: string) => Promise<string | null>
+  pickFiles?: (title: string, defaultPath?: string) => Promise<string[]>
+  /** Where to save one file: a Save As dialog. Null when cancelled. */
+  pickSavePath?: (title: string, defaultPath: string, filters?: { name: string; extensions: string[] }[]) => Promise<string | null>
+  /** The Windows print dialog for a picture. */
+  printImage?: (file: string) => Promise<void>
   openPath: (p: string) => Promise<void>
   showInFolder: (p: string) => void
   openExternal: (url: string) => Promise<void>
@@ -116,6 +133,8 @@ export class GalleryService {
   private readonly settings: SettingsStore
   private readonly vaults = new Map<SourceId, VaultEntry>()
   private readonly registry: DeviceRegistry<PhoneSession>
+  /** Android phones through Windows Portable Devices. iPhones go through usbmuxd. */
+  private readonly android = new AndroidPhones()
   private readonly watcher = new DeviceWatcher()
   // A quarter of the processor for HEIC decoding: thumbnails run in the
   // background and should leave room for everything else.
@@ -185,6 +204,7 @@ export class GalleryService {
     if (ppocr && !this.ocr) console.warn(`text reading models missing from ${ppocr}; search by text in photos is off`)
     this.registry = new DeviceRegistry<PhoneSession>({
       open: async (udid) => {
+        if (isAndroidId(udid)) return this.openAndroid(udid)
         const device = await AfcDevice.attach(udid)
         const ident = await device.identity()
         try {
@@ -207,7 +227,36 @@ export class GalleryService {
       },
       close: (s) => s.close(),
       nameOf: (s) => s.name,
+      // Both kinds of phone. One failing (Apple's service not installed, say)
+      // must not hide the other.
+      list: async () => {
+        const [iphones, androids] = await Promise.all([listUsb().catch(() => []), this.android.list()])
+        return [...iphones, ...androids]
+      },
+      listen: listenUsb,
     })
+  }
+
+  private async openAndroid(id: string): Promise<PhoneSession> {
+    const device = await this.android.attach(id)
+    try {
+      return await PhoneSession.open({
+        device,
+        udid: id,
+        name: (await device.identity()).name,
+        platform: 'android',
+        cacheRoot: path.join(this.deps.userData, 'phones'),
+        heic: this.heic,
+        metadata: this.metadata,
+        reconnect: () => this.android.attach(id),
+        onLost: () => void this.registry.reopen(id),
+      })
+    } catch (e) {
+      await device.dispose().catch(() => {})
+      // A watch or music player: stop offering it until it is plugged in again.
+      if (e instanceof NoPhotoFoldersError) this.android.ignore(id)
+      throw e
+    }
   }
 
   start() {
@@ -235,6 +284,7 @@ export class GalleryService {
     this.saveAbort?.abort()
     this.watcher.stop()
     await this.registry.stop()
+    await this.android.close()
     await this.thumbnailRun?.catch(() => {})
     this.searchDrain?.abort.abort()
     await this.searchRun?.catch(() => {})
@@ -253,7 +303,8 @@ export class GalleryService {
     const devices = this.registry.devices.map((d) => ({
       id: `device:${d.udid}`,
       udid: d.udid,
-      name: d.name ?? 'iPhone',
+      platform: isAndroidId(d.udid) ? ('android' as const) : ('iphone' as const),
+      name: d.name ?? (isAndroidId(d.udid) ? this.android.nameOf(d.udid) ?? 'Android phone' : 'iPhone'),
       state: d.state,
       error: d.error,
       count: d.session ? d.session.library.assets.length : null,
@@ -298,7 +349,7 @@ export class GalleryService {
       this.peopleRevision++
       void this.runSearchIndex()
     }
-    const what = (x: AppSettings) => [x.indexing, x.searchByMeaning, x.searchText, x.faceGrouping].join()
+    const what = (x: AppSettings) => [x.indexing, x.searchByMeaning, x.searchText, x.faceGrouping, x.deepIndexing].join()
     if (what(before) !== what(settings) && !(before.faceGrouping && !settings.faceGrouping)) {
       // Something was switched on or off: stop, then start again with the new set.
       this.searchDrain?.abort.abort()
@@ -322,6 +373,13 @@ export class GalleryService {
       ocr: s.searchText ? this.ocr : null,
       faces: this.peopleOn() ? this.faces : null,
     }
+  }
+
+  /** The stages the closer look runs: the same ones, when it is switched on. */
+  private deepStages(): DeepStages | null {
+    if (!this.settings.get().deepIndexing) return null
+    const s = this.stages()
+    return s.embed || s.ocr || s.faces ? s : null
   }
 
   /* ---------------------------------------------------------------- people */
@@ -384,6 +442,43 @@ export class GalleryService {
     return into
   }
 
+  /** This person's faces, to choose their picture from. */
+  async personFaces(source: SourceId, id: number): Promise<{ face: number; assetId: number }[]> {
+    const v = this.vaults.get(source)
+    if (!v || !this.peopleOn()) return []
+    return personFaces(v.vault.db, Number(id))
+  }
+
+  /** Use this face as their picture; null to let Theia choose again. */
+  async setPersonCover(source: SourceId, id: number, face: number | null): Promise<void> {
+    const v = this.peopleVault(source)
+    setPersonCover(v.vault.db, Number(id), face === null ? null : Number(face))
+    this.peopleChanged()
+  }
+
+  /** Use their face in this photo as their picture. */
+  async setPersonCoverFromPhoto(source: SourceId, id: number, key: string): Promise<void> {
+    const v = this.peopleVault(source)
+    const face = personFaceIn(v.vault.db, Number(id), Number(key))
+    if (face === null) throw new Error('They aren’t in that photo as far as Theia knows.')
+    setPersonCover(v.vault.db, Number(id), face)
+    this.peopleChanged()
+  }
+
+  /** Faces the closer look thinks might be this person, to say yes or no to. */
+  async personMaybes(source: SourceId, id: number): Promise<MaybeFace[]> {
+    const v = this.vaults.get(source)
+    if (!v || !this.peopleOn()) return []
+    return listMaybes(v.vault.db, Number(id))
+  }
+
+  async answerMaybes(source: SourceId, id: number, yes: number[], no: number[]): Promise<number> {
+    const v = this.peopleVault(source)
+    const n = answerMaybes(v.vault.db, Number(id), (yes ?? []).map(Number), (no ?? []).map(Number))
+    this.peopleChanged()
+    return n
+  }
+
   async hidePerson(source: SourceId, id: number, hidden: boolean): Promise<void> {
     const v = this.peopleVault(source)
     hidePerson(v.vault.db, Number(id), !!hidden)
@@ -428,6 +523,8 @@ export class GalleryService {
     const run = settlePeople(v.vault.db, reader)
       .then(async (r) => {
         if (r.joined || r.created || r.merged) this.peopleChanged()
+        // After a closer look: faces that might be someone named, to ask about.
+        if (this.settings.get().deepIndexing && findMaybes(v.vault.db)) this.peopleChanged()
         // Statues, carvings, drawings: hidden before anyone is asked to name them.
         if (this.embedder && !this.stopping) {
           const objects = await checkGroups(v.vault.db, v.vault.layout.cache, this.embedder, { onProgress: show })
@@ -925,6 +1022,142 @@ export class GalleryService {
     return entry.id
   }
 
+  /**
+   * Add photos and videos from a folder on this computer to a vault.
+   * Without a vault: the only open one, or ask for one. Without a folder: ask.
+   * Returns once the folder is read; the copying runs on, shown in the status bar.
+   */
+  async addFolderToVault(vaultId?: SourceId, folderPath?: string, opts: ImportOptions = {}): Promise<{ count: number; vaultName: string } | null> {
+    this.assertNotSaving()
+    const target = await this.importTarget(vaultId)
+    if (!target) return null
+    const root = folderPath ?? (await this.deps.pickFolder('Choose a folder of photos and videos to add'))
+    if (!root) return null
+    const { items, albums } = await scanFolderForImport(root, { exclude: [target.vault.layout.root] })
+    if (!items.length) throw new Error(`No photos or videos found in "${path.basename(root)}".`)
+    return this.startImport(target, items, albums, { deleteSources: opts?.deleteSources === true })
+  }
+
+  /** Add chosen or dropped files and folders to a vault. Without paths: ask for files. */
+  async addFilesToVault(vaultId?: SourceId, filePaths?: string[], opts: ImportOptions = {}): Promise<{ count: number; vaultName: string } | null> {
+    this.assertNotSaving()
+    const target = await this.importTarget(vaultId)
+    if (!target) return null
+    const paths = filePaths?.length ? filePaths : ((await this.deps.pickFiles?.('Choose photos and videos to add')) ?? [])
+    if (!paths.length) return null
+    const { items, albums } = await scanPathsForImport(paths, { exclude: [target.vault.layout.root] })
+    if (!items.length) throw new Error('None of those are photos or videos Theia can add.')
+    return this.startImport(target, items, albums, { deleteSources: opts?.deleteSources === true })
+  }
+
+  private assertNotSaving() {
+    if (this.save.status === 'running') throw new Error('A save is already running. Add these once it finishes.')
+  }
+
+  /** The vault asked for, the only one open, or one the person picks or makes now. */
+  private async importTarget(vaultId?: SourceId): Promise<VaultEntry | null> {
+    if (vaultId) {
+      const v = this.vaults.get(vaultId)
+      if (!v) throw new Error('That vault is not open any more.')
+      return v
+    }
+    if (this.vaults.size === 1) return [...this.vaults.values()][0]!
+    const picked = await this.deps.pickFolder('Choose a vault, or an empty folder for a new one')
+    if (!picked) return null
+    if (!isVault(picked) && !canCreateVault(picked)) throw new NotAVault(picked)
+    const entry = isVault(picked) ? this.addVault(picked) : this.addVault(picked, true)
+    this.saveVaultList()
+    return entry
+  }
+
+  private startImport(target: VaultEntry, items: SaveItem[], albums: SaveAlbum[], opts: ImportOptions): { count: number; vaultName: string } {
+    // Checked again: the folder may have taken a while to read.
+    this.assertNotSaving()
+    void this.runImportToVault(target, items, albums, opts)
+    return { count: items.length, vaultName: target.vault.manifest.name }
+  }
+
+  private async runImportToVault(target: VaultEntry, items: SaveItem[], albums: SaveAlbum[], opts: ImportOptions = {}): Promise<void> {
+    const name = target.vault.manifest.name
+    this.savingVaults.add(target.id)
+    const abort = new AbortController()
+    this.saveAbort = abort
+    this.save = { status: 'running', target: name, itemsDone: 0, itemsTotal: items.length, bytesDone: 0, current: null }
+    this.publish(true)
+    this.deps.setBusy(true)
+
+    const previousSync = target.vault.db.pragma('synchronous', { simple: true }) as number
+    try {
+      const vault = target.vault
+      // Originals will be deleted: every vault write reaches the disk first.
+      if (opts.deleteSources) vault.db.pragma('synchronous = FULL')
+      const result = await saveToVault(vault, items, albums, {
+        signal: abort.signal,
+        metadata: this.metadata,
+        replace: async (id) => {
+          trashAssets(vault.db, [id])
+          const r = await purgeAssets(vault.db, vault.layout.media, [id], this.deps.trash, privateDir(vault.layout))
+          if (!r.removed) {
+            restoreAssets(vault.db, [id])
+            throw new Error(r.failed[0]?.reason ?? 'it could not go to the Recycle Bin')
+          }
+        },
+        onProgress: (p) => {
+          this.save = { status: 'running', target: name, ...p }
+          this.publish()
+        },
+      })
+      if (result.replaced) await this.applyPrivacy(target).catch((e) => console.warn('privacy after replace:', (e as Error).message))
+      let cleanup: Extract<SaveState, { status: 'done' }>['cleanup']
+      if (opts.deleteSources) {
+        // A stopped import deletes nothing; a finished one, only what checks out (source-cleanup.ts).
+        if (abort.signal.aborted) cleanup = { from: 'folder', deleted: 0, kept: 0, reasons: [{ item: 'Originals', reason: 'The import was stopped, so nothing was deleted.' }] }
+        else {
+          const checkpoint = vault.db.pragma('wal_checkpoint(FULL)') as { busy: number }[]
+          if (checkpoint[0]?.busy) {
+            cleanup = { from: 'folder', deleted: 0, kept: 0, reasons: [{ item: 'Originals', reason: 'The vault couldn’t be written to disk completely, so nothing was deleted.' }] }
+          } else {
+            const done = result.saved + result.alreadyThere
+            const r = await recycleImportedSources(vault, items, result.assets, {
+              trash: this.deps.trash,
+              recycleBin: this.deps.recycleBinLimit,
+              signal: abort.signal,
+              progress: (current) => {
+                this.save = { status: 'running', target: name, itemsDone: done, itemsTotal: items.length, bytesDone: result.bytes, current, phase: 'recycling-originals', etaMs: null }
+                this.publish()
+              },
+            })
+            cleanup = { from: 'folder', ...r }
+          }
+        }
+      }
+      this.save = { status: 'done', target: name, ...result, cancelled: abort.signal.aborted, cleanup }
+    } catch (e) {
+      if (e instanceof SaveCancelled) {
+        const s = this.save
+        this.save = {
+          status: 'done',
+          target: name,
+          saved: s.status === 'running' ? s.itemsDone : 0,
+          alreadyThere: 0,
+          skippedCloud: 0,
+          failed: [],
+          cancelled: true,
+        }
+      } else {
+        this.save = { status: 'error', target: name, error: (e as Error).message }
+      }
+    } finally {
+      target.vault.db.pragma(`synchronous = ${previousSync}`)
+      this.savingVaults.delete(target.id)
+      this.changed(target)
+      this.saveAbort = null
+      this.deps.setBusy(false)
+      this.publish(true)
+    }
+    void this.runThumbnails()
+  }
+
   async closeVault(id: SourceId) {
     const v = this.vaults.get(id)
     if (!v) return
@@ -1112,6 +1345,7 @@ export class GalleryService {
   async saveItems(req: SaveRequest) {
     if (this.save.status === 'running') return
     if (req.deleteAfterSave && (!req.source.startsWith('device:') || req.framesOnly)) throw new Error('Delete after save is available only for complete iPhone items, not individual burst frames or vault copies.')
+    if (req.deleteAfterSave && isAndroidId(req.source.replace(/^device:/, ''))) throw new Error('Delete after save is available only for iPhones. Nothing on Android phones is changed by Theia.')
     let target: VaultEntry | undefined
     if ('newVault' in req.target) {
       const picked = await this.deps.pickFolder('Choose an empty folder for the new vault')
@@ -1142,7 +1376,7 @@ export class GalleryService {
     this.publish(true)
     this.deps.setBusy(true)
 
-    let device: AfcDevice | null = null
+    let device: DeviceSource | null = null
     let phoneSession: PhoneSession | null = null
     const previousSync = target.vault.db.pragma('synchronous', { simple: true }) as number
     try {
@@ -1158,7 +1392,7 @@ export class GalleryService {
         phoneSession = s
         if (req.deleteAfterSave) await s.load()
         // Its own connection: the gallery keeps browsing on the other one.
-        device = await AfcDevice.attach(s.udid)
+        device = s.platform === 'android' ? await this.android.attach(s.udid) : await AfcDevice.attach(s.udid)
         items = await phoneSaveItems(s, device, req.keys, req.framesOnly)
         albums = phoneSaveAlbums(s)
       }
@@ -1469,6 +1703,158 @@ export class GalleryService {
     return n
   }
 
+  /* ------------------------------------------------------ windows actions */
+  // The right-click menu's Copy, Share, Print, Save as, Open with, Set as and
+  // Resize. Each works on the item's real file, never on a cached thumbnail.
+  // Protected (encrypted) vault items and the phone's own Hidden and Recently
+  // Deleted are refused: they would have to be written out decrypted, or
+  // copied off the phone, which Theia never does with them.
+
+  /** The original of an item as a file on this computer. */
+  private async originalFile(source: SourceId, key: string): Promise<{ file: string; name: string; mime: string; id: string }> {
+    const v = this.vaults.get(source)
+    if (v) {
+      const files = vaultFiles(v.vault.db, key)
+      const f = files.find((x) => x.primary) ?? files[0]
+      if (!f) throw new Error('That item has no file.')
+      if (f.encryptedPath) throw new Error('This item is protected (encrypted in the vault), so Theia won’t hand its file to Windows. Unhide or recover it first.')
+      return { file: path.join(v.vault.layout.media, ...f.path.split('/')), name: path.posix.basename(f.path), mime: f.mime, id: f.sha256 }
+    }
+    const s = this.phone(source)
+    if (s.isPrivate(key)) throw new Error('This is in the phone’s Hidden album or Recently Deleted. Theia never copies those to this computer; save it into a vault first.')
+    const a = s.asset(key)
+    if (!a || a.cloud) throw new Error('That item is only in iCloud, not on the phone.')
+    const local = await s.original(key)
+    if (!local) throw new Error('The phone didn’t send the file. Check it is still unlocked and plugged in.')
+    return { file: local, name: a.filename, mime: mimeOf(a.filename), id: `${s.udid}-${safeName(a.filename)}-${key}` }
+  }
+
+  /** The item as a picture any app reads (JPEG, PNG or GIF): HEIC and the rest are converted, once, into the cache. */
+  private async pictureFile(source: SourceId, key: string): Promise<{ path: string; name: string }> {
+    const o = await this.originalFile(source, key)
+    if (o.mime.startsWith('video/')) throw new Error('That’s a video. This works with photos.')
+    const v = this.vaults.get(source)
+    const cache = v ? path.join(v.vault.layout.cache, 'full') : path.join(this.deps.userData, 'phones', 'full')
+    const shown = await this.displayable(o.file, o.mime, cache, o.id)
+    return { path: shown.path, name: o.name }
+  }
+
+  /** Copy, as File Explorer does: paste into a folder for the files, or into a chat or document for the picture. */
+  async copyItems(source: SourceId, keys: string[]): Promise<void> {
+    if (!keys.length) return
+    const files = []
+    for (const key of keys) files.push(await this.originalFile(source, key))
+    const picture = keys.length === 1 && !files[0]!.mime.startsWith('video/') ? (await this.pictureFile(source, keys[0]!)).path : undefined
+    await copyFiles(files.map((f) => f.file), picture)
+  }
+
+  /** "Copy as path": each original's full path in quotes, one per line, as File Explorer copies them. */
+  async itemPaths(source: SourceId, keys: string[]): Promise<string> {
+    if (!this.vaults.has(source)) throw new Error('Photos on a phone have no path on this computer. Save them into a vault first.')
+    const out: string[] = []
+    for (const key of keys) out.push(`"${(await this.originalFile(source, key)).file}"`)
+    return out.join('\r\n')
+  }
+
+  /** The Windows share sheet, over `at` (a point on screen: the middle of Theia's window). */
+  async shareItems(source: SourceId, keys: string[], at: { x: number; y: number }): Promise<void> {
+    if (!keys.length) return
+    const files = []
+    for (const key of keys) files.push((await this.originalFile(source, key)).file)
+    await shareFiles(files, at)
+  }
+
+  async printItem(source: SourceId, key: string): Promise<void> {
+    if (!this.deps.printImage) throw new Error('Printing isn’t available here.')
+    await this.deps.printImage((await this.pictureFile(source, key)).path)
+  }
+
+  /**
+   * A copy of the originals somewhere else: one file through a Save As
+   * dialog, several into a chosen folder. Returns where, or null when cancelled.
+   */
+  async saveItemsAs(source: SourceId, keys: string[]): Promise<string | null> {
+    if (!keys.length) return null
+    const files = []
+    for (const key of keys) files.push(await this.originalFile(source, key))
+    if (files.length === 1) {
+      const f = files[0]!
+      const ext = path.extname(f.name).slice(1)
+      const target = await this.deps.pickSavePath?.('Save a copy', path.join(os.homedir(), 'Pictures', f.name), ext ? [{ name: ext.toUpperCase(), extensions: [ext] }] : undefined)
+      if (!target) return null
+      if (path.resolve(target).toLowerCase() === path.resolve(f.file).toLowerCase()) throw new Error('That’s the original itself. Choose another name or folder.')
+      await fs.promises.copyFile(f.file, target)
+      return target
+    }
+    const dir = await this.deps.pickFolder(`Choose a folder for ${files.length} copies`)
+    if (!dir) return null
+    for (const f of files) await fs.promises.copyFile(f.file, freeTarget(dir, f.name))
+    return dir
+  }
+
+  /** The apps Windows offers to open this kind of file with, its default first. */
+  async openWithChoices(source: SourceId, key: string): Promise<AppChoice[]> {
+    const o = await this.originalFile(source, key)
+    return openWithChoices(await shellCommands(o.file))
+  }
+
+  /**
+   * Open the item in another app: `id` from openWithChoices, or 'choose' for
+   * Windows' own app picker. A vault's original is opened as a copy, so an
+   * editor saving over it can't change what the vault keeps and has checked.
+   */
+  async openItemWith(source: SourceId, key: string, id: string): Promise<void> {
+    const o = await this.originalFile(source, key)
+    let file = o.file
+    if (this.vaults.has(source)) {
+      const dir = path.join(os.tmpdir(), 'Theia', 'Open')
+      fs.mkdirSync(dir, { recursive: true })
+      file = path.join(dir, `${safeName(key)}-${o.name}`)
+      const st = fs.statSync(file, { throwIfNoEntry: false })
+      if (!st || st.size !== fs.statSync(o.file).size) await fs.promises.copyFile(o.file, file)
+    }
+    if (id === 'choose') chooseApp(file)
+    else await runShellCommand(file, id)
+  }
+
+  /** Desktop background or lock screen, from a JPEG copy Theia keeps for it (the original can move or be deleted). */
+  async setItemAs(source: SourceId, key: string, where: 'desktop' | 'lock'): Promise<void> {
+    const picture = await this.pictureFile(source, key)
+    const dir = path.join(this.deps.userData, 'backgrounds')
+    fs.mkdirSync(dir, { recursive: true })
+    const target = path.join(dir, `${where}-${Date.now()}.jpg`)
+    await sharp(picture.path).rotate().jpeg({ quality: 92 }).toFile(target)
+    if (where === 'desktop') await setWallpaper(target)
+    else await setLockScreen(target)
+    // Earlier copies for the same place are no longer in use.
+    for (const name of fs.readdirSync(dir)) {
+      if (name.startsWith(`${where}-`) && path.join(dir, name) !== target) fs.rmSync(path.join(dir, name), { force: true })
+    }
+  }
+
+  /**
+   * A resized copy, saved where the person chooses: fits inside width x
+   * height, never enlarged, the right way up. Returns where, or null.
+   */
+  async resizeItem(source: SourceId, key: string, opts: { width: number; height: number; format: 'jpeg' | 'png' | 'webp'; quality: number }): Promise<string | null> {
+    const width = Math.round(Number(opts.width)), height = Math.round(Number(opts.height))
+    if (!(width >= 16 && height >= 16 && width <= 20000 && height <= 20000)) throw new Error('Choose a size between 16 and 20,000 pixels.')
+    if (!['jpeg', 'png', 'webp'].includes(opts.format)) throw new Error('Choose JPEG, PNG or WebP.')
+    const o = await this.originalFile(source, key)
+    if (o.mime.startsWith('video/')) throw new Error('That’s a video. Resizing works with photos.')
+    const ext = opts.format === 'jpeg' ? 'jpg' : opts.format
+    const stem = path.parse(o.name).name
+    // Beside the original for a vault item would put it inside the vault; Pictures instead.
+    const target = await this.deps.pickSavePath?.('Save the resized copy', path.join(os.homedir(), 'Pictures', `${stem} (${width}x${height}).${ext}`),
+      [{ name: opts.format.toUpperCase(), extensions: [ext] }])
+    if (!target) return null
+    const quality = Math.max(10, Math.min(100, Math.round(Number(opts.quality) || 90)))
+    let img = (await openSource(o.file, o.mime, { heic: this.heic })).resize(width, height, { fit: 'inside', withoutEnlargement: true })
+    img = opts.format === 'png' ? img.png() : opts.format === 'webp' ? img.webp({ quality }) : img.removeAlpha().jpeg({ quality, mozjpeg: true })
+    await img.toFile(target)
+    return target
+  }
+
   /* ----------------------------------------------------------------- misc */
 
   async reveal(source: SourceId, key: string) {
@@ -1582,7 +1968,11 @@ export class GalleryService {
           if (this.closingVaults.has(x.id) || this.savingVaults.has(x.id)) return false
           return queueSearchJobs(x.vault.db, x.queue, stages) > 0
         })
-        if (!v) return
+        if (!v) {
+          // Everything read: the closer look, when it is on.
+          if (await this.runDeepOnce()) continue
+          return
+        }
         const abort = new AbortController()
         let faced = 0
         const progress = (job?: { kind: string }) => {
@@ -1606,6 +1996,43 @@ export class GalleryService {
     } catch (e) {
       console.error('search indexing stopped:', (e as Error).message)
     }
+  }
+
+  /**
+   * Look closely at one vault's photos, after the first pass is done
+   * everywhere (deep.ts), then group again. False when there is nothing to do.
+   */
+  private async runDeepOnce(): Promise<boolean> {
+    const stages = this.deepStages()
+    if (!stages || this.stopping || this.thumbnailRun) return false
+    const v = [...this.vaults.values()].find((x) => {
+      if (this.closingVaults.has(x.id) || this.savingVaults.has(x.id)) return false
+      return queueDeep(x.vault.db, x.queue, stages) > 0
+    })
+    if (!v) return false
+    const abort = new AbortController()
+    let faced = 0
+    const progress = () => {
+      if (!this.vaults.has(v.id)) return
+      this.searchIndexing = { vault: v.vault.manifest.name, step: 'deep', ...deepProgress(v.vault.db, stages) }
+      this.publish()
+      // New faces become people as they are found, not only at the end.
+      if (stages.faces && ++faced % 250 === 0) void this.settle(v)
+    }
+    progress()
+    const done = runDeep(v.vault.db, v.queue, v.vault.layout.media, v.vault.layout.cache, { heic: this.heic, stages }, {
+      signal: abort.signal,
+      onSettled: progress,
+      rest: () => this.rest(),
+    })
+    this.searchDrain = { vault: v.id, abort, done }
+    try {
+      await done
+    } finally {
+      if (this.searchDrain?.done === done) this.searchDrain = null
+    }
+    if (stages.faces) await this.settle(v, true)
+    return !abort.signal.aborted
   }
 
   private async runThumbnailsImpl() {
@@ -1695,6 +2122,14 @@ export class GalleryService {
 
 function safeName(name: string): string {
   return name.replace(/[^\w.-]/g, '_')
+}
+
+/** `name` in `dir`, or "name (2)" and so on when that is taken. */
+function freeTarget(dir: string, name: string): string {
+  const { name: stem, ext } = path.parse(name)
+  let target = path.join(dir, name)
+  for (let n = 2; fs.existsSync(target); n++) target = path.join(dir, `${stem} (${n})${ext}`)
+  return target
 }
 
 function videoMime(file: string): string {

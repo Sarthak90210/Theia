@@ -11,6 +11,13 @@
 // Each face is then turned upright and scaled by its landmarks onto the
 // standard 112x112 face template, and SFace (Apache 2.0, OpenCV Zoo) turns it
 // into 128 numbers. Faces of one person point the same way.
+//
+// The closer look (`deep`, on a full-resolution copy of the photo) looks
+// harder with the same two models: finer tiles at 2304 px and at the photo's
+// own size, for faces a few dozen pixels across in a crowd; the photo turned
+// a quarter each way, for someone lying down or a photo saved sideways; a
+// lower detection threshold (0.8 against 0.85); and each face described twice, as it is and
+// mirrored, the two averaged, which describes it more steadily.
 
 import fs from 'node:fs'
 import path from 'node:path'
@@ -26,6 +33,10 @@ const NMS_IOU = 0.3
 /** Smaller than this (in the 1600 px thumbnail) is too blurry to recognise reliably. */
 const MIN_FACE = 40
 const MAX_FACES = 40
+// 0.8, not lower: on a real library every face found below 0.8 was a hand or the back of a head.
+const DEEP = { minScore: 0.8, maxFaces: 80, tileEdges: [1152, 2304, 3200] }
+/** Tiles overlap by this much, so a face cut by one tile's edge is whole in the next. */
+const TILE_OVERLAP = 128
 
 /** Where the eyes, nose and mouth corners sit in a 112x112 face crop (the ArcFace template). */
 const TEMPLATE = [
@@ -48,29 +59,38 @@ export async function loadFaces(dir, { threads = 2, device = 'cpu' } = {}) {
  * Faces in an image file, biggest first: box and landmarks in the image's
  * pixels, detection score, a sharpness measure, and a unit vector.
  */
-export async function readFaces(models, file) {
+export async function readFaces(models, file, { deep = false } = {}) {
   const { data, info } = await sharp(await fs.promises.readFile(file)).removeAlpha().toColourspace('srgb').raw().toBuffer({ resolveWithObject: true })
   const image = { data, width: info.width, height: info.height, channels: info.channels }
+  const minScore = deep ? DEEP.minScore : MIN_SCORE
   const found = []
   const long = Math.max(image.width, image.height)
   // Whole image at 640 and at 320 (for faces too big for the model at 640).
   for (const fit of [INPUT, INPUT / 2]) {
     const s = fit / long
-    found.push(...(await detectAt(models.det, image, s, 0, 0)))
+    found.push(...(await detectAt(models.det, image, s, 0, 0, minScore)))
   }
   // Overlapping tiles of a larger copy, for small faces.
-  if (long > INPUT) {
-    const s = Math.min(1152 / long, 1)
+  for (const edge of deep ? DEEP.tileEdges : [1152]) {
+    if (long <= INPUT) break
+    const s = Math.min(edge / long, 1)
     const w = Math.round(image.width * s), h = Math.round(image.height * s)
-    const xs = w > INPUT ? [0, w - INPUT] : [0]
-    const ys = h > INPUT ? [0, h - INPUT] : [0]
-    for (const ox of xs) for (const oy of ys) found.push(...(await detectAt(models.det, image, s, ox, oy)))
+    for (const ox of tileStarts(w)) for (const oy of tileStarts(h)) found.push(...(await detectAt(models.det, image, s, ox, oy, minScore)))
+    if (s === 1) break
   }
-  const faces = nms(found).filter((f) => Math.min(f.w, f.h) >= MIN_FACE).slice(0, MAX_FACES)
+  // Turned a quarter each way, whole: faces lying sideways.
+  if (deep) {
+    for (const angle of [90, 270]) {
+      const turned = await rotateImage(image, angle)
+      const s = INPUT / Math.max(turned.width, turned.height)
+      for (const f of await detectAt(models.det, turned, s, 0, 0, minScore)) found.push(unturn(f, angle, image.width, image.height))
+    }
+  }
+  const faces = nms(found).filter((f) => Math.min(f.w, f.h) >= MIN_FACE).slice(0, deep ? DEEP.maxFaces : MAX_FACES)
   const out = []
   for (const f of faces) {
     const crop = alignedCrop(image, f.landmarks)
-    const vec = await describe(models.rec, crop)
+    const vec = deep ? average(await describe(models.rec, crop), await describe(models.rec, mirror(crop))) : await describe(models.rec, crop)
     out.push({
       box: [f.x, f.y, f.w, f.h].map((v) => Math.round(v * 10) / 10),
       landmarks: f.landmarks.map(([x, y]) => [Math.round(x * 10) / 10, Math.round(y * 10) / 10]),
@@ -87,7 +107,60 @@ export async function readFaces(models, file) {
  * window whose top left is (ox, oy) in the scaled image. Returns faces in the
  * original image's pixels.
  */
-async function detectAt(session, image, scale, ox, oy) {
+/** Left edges of 640 px windows across n pixels, overlapping by TILE_OVERLAP. */
+export function tileStarts(n) {
+  if (n <= INPUT) return [0]
+  const count = Math.ceil((n - TILE_OVERLAP) / (INPUT - TILE_OVERLAP))
+  const step = (n - INPUT) / (count - 1)
+  return Array.from({ length: count }, (_, i) => Math.round(i * step))
+}
+
+async function rotateImage(image, angle) {
+  const { data, info } = await sharp(image.data, { raw: { width: image.width, height: image.height, channels: image.channels } })
+    .rotate(angle).raw().toBuffer({ resolveWithObject: true })
+  return { data, width: info.width, height: info.height, channels: info.channels }
+}
+
+/**
+ * A point found in the image turned clockwise by `angle` (90 or 270), back in
+ * the w x h original. Turned 90: (x, y) came from (y, h - x). Turned 270:
+ * from (w - y, x).
+ */
+export function unturnPoint([x, y], angle, w, h) {
+  return angle === 90 ? [y, h - x] : [w - y, x]
+}
+
+/** A face found in the turned image, in the original's pixels; its box bounds its turned corners. */
+function unturn(f, angle, w, h) {
+  const corners = [[f.x, f.y], [f.x + f.w, f.y], [f.x, f.y + f.h], [f.x + f.w, f.y + f.h]].map((p) => unturnPoint(p, angle, w, h))
+  const xs = corners.map((p) => p[0]), ys = corners.map((p) => p[1])
+  const x = Math.min(...xs), y = Math.min(...ys)
+  return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y, score: f.score, landmarks: f.landmarks.map((p) => unturnPoint(p, angle, w, h)) }
+}
+
+/** The 112x112 crop flipped left to right. */
+function mirror(crop) {
+  const out = new Float32Array(crop.length)
+  const plane = 112 * 112
+  for (let c = 0; c < 3; c++) {
+    for (let y = 0; y < 112; y++) {
+      for (let x = 0; x < 112; x++) out[c * plane + y * 112 + x] = crop[c * plane + y * 112 + (111 - x)]
+    }
+  }
+  return out
+}
+
+/** The mean of two unit vectors, made unit again. */
+function average(a, b) {
+  const v = new Float32Array(a.length)
+  let s = 0
+  for (let i = 0; i < a.length; i++) { v[i] = a[i] + b[i]; s += v[i] * v[i] }
+  s = Math.sqrt(s) || 1
+  for (let i = 0; i < v.length; i++) v[i] /= s
+  return v
+}
+
+async function detectAt(session, image, scale, ox, oy, minScore = MIN_SCORE) {
   const sw = Math.max(1, Math.round(image.width * scale))
   const sh = Math.max(1, Math.round(image.height * scale))
   const scaled = await sharp(image.data, { raw: { width: image.width, height: image.height, channels: image.channels } })
@@ -113,7 +186,7 @@ async function detectAt(session, image, scale, ox, oy) {
     const cols = INPUT / stride
     for (let i = 0; i < cls.length; i++) {
       const score = Math.sqrt(Math.min(1, Math.max(0, cls[i])) * Math.min(1, Math.max(0, obj[i])))
-      if (score < MIN_SCORE) continue
+      if (score < minScore) continue
       const r = Math.floor(i / cols), c = i % cols
       const cx = (c + bbox[4 * i]) * stride, cy = (r + bbox[4 * i + 1]) * stride
       const bw = Math.exp(bbox[4 * i + 2]) * stride, bh = Math.exp(bbox[4 * i + 3]) * stride

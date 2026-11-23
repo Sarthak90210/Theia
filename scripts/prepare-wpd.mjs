@@ -33,6 +33,8 @@ export async function prepareWpd(output = path.join(root, 'dist-app', 'wpd')) {
   const extract = `Add-Type -AssemblyName System.IO.Compression.FileSystem; $zip = [IO.Compression.ZipFile]::OpenRead(${literal(archive)}); try { $entry = $zip.GetEntry('lib/net45/MediaDevices.dll'); if (-not $entry) { throw 'MediaDevices DLL missing' }; [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, ${literal(dll)}, $true) } finally { $zip.Dispose() }`
   execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', extract], { windowsHide: true })
   fs.copyFileSync(path.join(root, 'src/device/wpd-helper.ps1'), path.join(output, 'wpd-helper.ps1'))
+  // Reads Android phones (MTP) for browsing and saving. Uses the same pinned library.
+  fs.copyFileSync(path.join(root, 'src/device/mtp-helper.ps1'), path.join(output, 'mtp-helper.ps1'))
   fs.writeFileSync(path.join(output, 'provenance.json'), JSON.stringify({ name: 'MediaDevices', version, url, sha256,
     source: 'https://github.com/Bassman2/MediaDevices', license: 'MIT' }, null, 2))
   const licenseFile = path.join(cache, 'MediaDevices-LICENSE')

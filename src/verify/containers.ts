@@ -94,11 +94,32 @@ export function checkJpeg(src: RandomAccess): StructureResult {
 
   if (!sawSos) return fail('jpeg', 'no start-of-scan marker, the image carries no pixel data')
 
+  // Most JPEGs end with their EOI marker.
   const tail = src.read(src.size - 2, 2)
-  if (tail.length < 2 || tail[0] !== 0xff || tail[1] !== 0xd9) {
-    return fail('jpeg', 'missing EOI marker at end of file, the image is truncated')
+  if (tail.length === 2 && tail[0] === 0xff && tail[1] === 0xd9) return pass('jpeg')
+
+  // Many cameras put more after it: Samsung's metadata trailer (ending
+  // "SEFT"), a Motion Photo's video, a depth map. That is a whole image with
+  // extras, not a cut-off one, as long as the EOI is there. Inside the scan
+  // data an 0xFF is always followed by 0x00 or a restart marker, so the first
+  // FF D9 after the start of scan is the image's real end.
+  const eoi = findEoi(src, i)
+  if (eoi < 0) return fail('jpeg', 'missing EOI marker, the image is truncated')
+  return pass('jpeg', `${src.size - eoi - 2} bytes after the end of the image (a camera's trailer)`)
+}
+
+/** Offset of the first FF D9 at or after `from`, or -1. Reads in chunks, so a large file is never held whole. */
+function findEoi(src: RandomAccess, from: number): number {
+  const CHUNK = 1024 * 1024
+  for (let at = from; at < src.size - 1; at += CHUNK - 1) {
+    // Chunks overlap by one byte, so a marker split across two is still found.
+    const buf = src.read(at, Math.min(CHUNK, src.size - at))
+    for (let k = buf.indexOf(0xff); k >= 0 && k < buf.length - 1; k = buf.indexOf(0xff, k + 1)) {
+      if (buf[k + 1] === 0xd9) return at + k
+    }
+    if (buf.length < 2) break
   }
-  return pass('jpeg')
+  return -1
 }
 
 /* --------------------------------------------------------------- ISO BMFF */

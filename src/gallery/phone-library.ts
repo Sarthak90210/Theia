@@ -54,6 +54,8 @@ export interface PhoneLibrary {
   albums: PhoneAlbum[]
   /** Which schema shape was found, for the findings log. */
   schema: { assetTable: string; albumJoin: string | null; columns: number }
+  /** False when the phone has no Hidden album or Recently Deleted to show (Android). */
+  utilities?: boolean
 }
 
 type Row = Record<string, unknown>
@@ -293,6 +295,7 @@ export function phoneCollections(lib: PhoneLibrary): Collections {
     ['hidden', 'Hidden', lib.hidden],
     ['deleted', 'Recently Deleted', lib.deleted],
   ] as const) {
+    if (lib.utilities === false && !keys.length) continue
     smart.push({ id, name, kind: 'utility', count: keys.length, cover: keys.at(-1) ?? null })
   }
   const albums = lib.albums.map(

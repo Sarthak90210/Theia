@@ -847,6 +847,8 @@ button.link:hover {
   gap: 12px;
   flex: 1;
   min-width: 0;
+  flex-wrap: nowrap;
+  overflow: hidden;
 }
 .status-save.attention > span:first-child {
   color: var(--warn);
@@ -987,7 +989,6 @@ button.link:hover {
   position: absolute;
   inset: 0;
   transform-origin: center;
-  will-change: transform;
 }
 .viewer-photo.zoomed {
   cursor: grab;

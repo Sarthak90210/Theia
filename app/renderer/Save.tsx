@@ -26,7 +26,8 @@ export function SaveMenu({ state, source, keys, label, primary, framesOnly, onEr
   const trigger = useRef<HTMLButtonElement>(null)
   const busy = state.save.status === 'running'
   const targets = state.vaults.filter((v) => v.id !== source)
-  const phone = source.startsWith('device:')
+  // Deleting after a save is built on the iPhone's own checks. Android phones are only ever read.
+  const phone = source.startsWith('device:') && state.devices.find((d) => d.id === source)?.platform !== 'android'
 
   useEffect(() => {
     if (pending) dialog.current?.querySelector<HTMLButtonElement>('button')?.focus()
@@ -161,9 +162,14 @@ export function StatusBar({ state }: { state: AppState }) {
   const s = state.save
   const [showFailed, setShowFailed] = useState(false)
   const t = state.thumbnails
+  const ix = state.search.indexing
+  const hasIndexing = Boolean(t || ix?.step === 'reading' || ix?.step === 'people' || ix?.step === 'deep')
+  const hasSave = s.status === 'running' || s.status === 'done' || s.status === 'error'
+
+  if (!hasSave && !hasIndexing) return null
 
   return (
-    <footer className="status">
+    <footer className="status status-visible">
       {s.status === 'running' && (
         <div className="status-save">
           <span>
@@ -174,7 +180,7 @@ export function StatusBar({ state }: { state: AppState }) {
           <span className="bar">
             <span style={{ width: `${savePercent(s)}%` }} />
           </span>
-          <span className="status-eta">{s.phase === 'checking-deletion' ? 'Triple-checking before iPhone deletion…' : s.phase === 'deleting' ? 'Deleting verified iPhone originals…' : <>{s.phase === 'verifying' ? 'Checking… · ' : ''}{remainingLabel(s.etaMs)}</>}</span>
+          <span className="status-eta">{s.phase === 'checking-deletion' ? 'Triple-checking before iPhone deletion…' : s.phase === 'deleting' ? 'Deleting verified iPhone originals…' : s.phase === 'recycling-originals' ? 'Checking each original, then moving it to the Recycle Bin…' : <>{s.phase === 'verifying' ? 'Checking… · ' : ''}{remainingLabel(s.etaMs)}</>}</span>
           {s.current && (
             <span className="muted small current" title={s.current}>
               {s.current}
@@ -215,7 +221,7 @@ export function StatusBar({ state }: { state: AppState }) {
               <span className="mono">{f.file}</span> <span className="muted">{f.reason}</span>
             </li>
           ))}
-          {s.cleanup?.reasons.map((r, i) => <li key={`cleanup-${i}`}><span>{r.item}</span> <span className="muted">iPhone cleanup: {r.reason}</span></li>)}
+          {s.cleanup?.reasons.map((r, i) => <li key={`cleanup-${i}`}><span>{r.item}</span> <span className="muted">{s.cleanup?.from === 'folder' ? 'Original kept' : 'iPhone cleanup'}: {r.reason}</span></li>)}
         </ul>
       )}
       <IndexingStatus state={state} />
@@ -235,7 +241,8 @@ function doneText(s: Extract<AppState['save'], { status: 'done' }>): string {
   if (s.alreadyThere) parts.push(`${count(s.alreadyThere)} ${s.alreadyThere === 1 ? 'was' : 'were'} already there`)
   if (s.skippedCloud) parts.push(`${plural(s.skippedCloud, 'item')} only in iCloud ${s.skippedCloud === 1 ? 'was' : 'were'} skipped`)
   if (s.failed.length) parts.push(`${count(s.failed.length)} failed`)
-  if (s.cleanup) parts.push(`${s.cleanup.deleted} deleted from iPhone, ${s.cleanup.kept} kept or not confirmed deleted`)
+  if (s.cleanup?.from === 'folder') parts.push(`${plural(s.cleanup.deleted, 'original')} moved to the Recycle Bin${s.cleanup.kept ? `, ${count(s.cleanup.kept)} kept` : ''}`)
+  else if (s.cleanup) parts.push(`${s.cleanup.deleted} deleted from iPhone, ${s.cleanup.kept} kept or not confirmed deleted`)
   return parts.join(', ') + '.'
 }
 
@@ -255,6 +262,7 @@ function IndexingStatus({ state }: { state: AppState }) {
   if (t) step = { n: 1, label: 'Making thumbnails', done: t.done, total: t.total, vault: null }
   else if (ix?.step === 'reading') step = { n: 2, label: people ? 'Reading photos for search and people' : 'Reading photos for search', done: ix.done, total: ix.total, vault: ix.vault }
   else if (ix?.step === 'people') step = { n: 3, label: 'Grouping people', done: ix.done, total: ix.total, vault: ix.vault }
+  if (!step && ix?.step === 'deep') return <DeepStatus vault={ix.vault} done={ix.done} total={ix.total} people={people} />
   if (!step) return null
   const known = step.total > 0
   const title = `Theia makes thumbnails, then reads each photo once so you can search by what it shows${people ? ', and finds the people in it' : ''}. `
@@ -269,5 +277,141 @@ function IndexingStatus({ state }: { state: AppState }) {
         <span style={{ width: known ? `${(step.done / step.total) * 100}%` : '35%' }} />
       </span>
     </span>
+  )
+}
+
+/** The closer look, after indexing is done: its own line, not a fourth step. */
+function DeepStatus({ vault, done, total, people }: { vault: string; done: number; total: number; people: boolean }) {
+  const known = total > 0
+  const title = 'Theia is reading every photo again, more closely, at full resolution: small and turned faces'
+    + (people ? ', more photos of the people you named' : '') + ', small print, and things in a corner of a photo. '
+    + 'Search works meanwhile. Switch it off in Settings to stop; nothing found so far is lost.'
+  return (
+    <span className="status-thumbs status-indexing muted small" title={title} role="status" aria-live="off">
+      Looking closer at {vault}{known ? ` · ${count(done)} of ${count(total)}` : '…'}
+      <span className={`bar small ${known ? '' : 'busy'}`}>
+        <span style={{ width: known ? `${(done / total) * 100}%` : '35%' }} />
+      </span>
+    </span>
+  )
+}
+
+export interface AddPhotosMenuProps {
+  /** `deleteSources`: move the originals to the Recycle Bin once they are checked to be in the vault. */
+  onAddFolder: (deleteSources: boolean) => void
+  onAddFiles: (deleteSources: boolean) => void
+  disabled?: boolean
+}
+
+/**
+ * "Add photos…": from a folder or chosen files. With "Delete originals"
+ * ticked, a confirmation says exactly what will happen before anything does.
+ */
+export function AddPhotosMenu({ onAddFolder, onAddFiles, disabled }: AddPhotosMenuProps) {
+  const [open, setOpen] = useState(false)
+  const [deleteAfter, setDeleteAfter] = useState(false)
+  const [confirm, setConfirm] = useState<'folder' | 'files' | null>(null)
+  const box = useRef<HTMLDivElement>(null)
+  const trigger = useRef<HTMLButtonElement>(null)
+  const dialog = useRef<HTMLDivElement>(null)
+  const title = useId()
+
+  useEffect(() => {
+    if (!open) return
+    const close = (e: MouseEvent) => {
+      if (!box.current?.contains(e.target as Node)) setOpen(false)
+    }
+    const frame = requestAnimationFrame(() => box.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus())
+    const esc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        setOpen(false)
+        trigger.current?.focus()
+        return
+      }
+      if (!['ArrowDown', 'ArrowUp', 'Home', 'End', 'Tab'].includes(e.key)) return
+      const buttons = Array.from(box.current?.querySelectorAll<HTMLElement>('[role="menuitem"], input[type="checkbox"]') ?? [])
+      if (!buttons.length) return
+      e.preventDefault()
+      const index = buttons.indexOf(document.activeElement as HTMLElement)
+      const next = e.key === 'Home' ? 0 : e.key === 'End' ? buttons.length - 1 :
+        (index + ((e.key === 'ArrowUp' || (e.key === 'Tab' && e.shiftKey)) ? -1 : 1) + buttons.length) % buttons.length
+      buttons[next]?.focus()
+    }
+    window.addEventListener('mousedown', close)
+    window.addEventListener('keydown', esc)
+    return () => {
+      window.removeEventListener('mousedown', close)
+      window.removeEventListener('keydown', esc)
+      cancelAnimationFrame(frame)
+    }
+  }, [open])
+
+  useEffect(() => {
+    if (confirm) dialog.current?.querySelector<HTMLButtonElement>('button')?.focus()
+  }, [confirm])
+
+  const choose = (what: 'folder' | 'files') => {
+    setOpen(false)
+    if (deleteAfter) return setConfirm(what)
+    trigger.current?.focus()
+    if (what === 'folder') onAddFolder(false)
+    else onAddFiles(false)
+  }
+  const go = () => {
+    const what = confirm
+    setConfirm(null)
+    if (what === 'folder') onAddFolder(true)
+    else if (what === 'files') onAddFiles(true)
+  }
+
+  return (
+    <div className="menu-anchor" ref={box}>
+      <button
+        ref={trigger}
+        className="ghost"
+        disabled={disabled}
+        onClick={() => setOpen((o) => !o)}
+        aria-label="Add photos and videos"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title="Add photos from a folder or files on this computer"
+      >
+        <I.Plus size={16} /> Add photos…
+      </button>
+      {open && (
+        <div className="menu" role="menu">
+          <div className="menu-heading">Add to this vault</div>
+          <label className="save-cleanup-choice" title="Each original goes to the Recycle Bin only after its exact bytes are checked in the vault">
+            <input type="checkbox" checked={deleteAfter} onChange={(e) => setDeleteAfter(e.target.checked)} />
+            <span>Delete originals after they’re safely in the vault</span>
+          </label>
+          <button role="menuitem" className="menu-item" onClick={() => choose('folder')}>
+            <I.Folder size={16} />
+            <span className="menu-label">Add from folder…</span>
+          </button>
+          <button role="menuitem" className="menu-item" onClick={() => choose('files')}>
+            <I.Plus size={16} />
+            <span className="menu-label">Add files…</span>
+          </button>
+        </div>
+      )}
+      {confirm && createPortal(
+        <div className="modal-scrim" onPointerDown={(e) => { if (e.target === e.currentTarget) setConfirm(null) }} onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') setConfirm(null) }}>
+          <div className="confirm-dialog vault-confirm-dialog" ref={dialog} role="dialog" aria-modal="true" aria-labelledby={title}>
+            <div className="vault-confirm-icon"><I.Trash size={24} /></div>
+            <h2 id={title}>Add, then delete the originals?</h2>
+            <p>Theia adds the {confirm === 'folder' ? 'folder’s photos and videos' : 'files'} to this vault first. Then, one by one, it moves each original to the Recycle Bin, but only after checking that its exact bytes are in the vault and read back correctly.</p>
+            <p>Anything that wasn’t saved, changed meanwhile, or is on a drive without a Recycle Bin stays where it is, and you’re told why. Other files in the folder are never touched. You can restore originals from the Recycle Bin.</p>
+            <div className="dialog-buttons">
+              <button className="ghost" onClick={() => setConfirm(null)}>Cancel</button>
+              <button className="primary destructive-action" onClick={go}>Add, then delete originals</button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+    </div>
   )
 }

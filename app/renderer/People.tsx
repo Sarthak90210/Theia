@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react'
-import { mediaUrl, type AppState, type PersonInfo, type SourceId } from '../shared/api.ts'
+import { createPortal } from 'react-dom'
+import { mediaUrl, type AppState, type MaybeFace, type PersonInfo, type SourceId } from '../shared/api.ts'
 import { count, plural } from './format.ts'
 import * as I from './icons.tsx'
 
@@ -22,6 +23,7 @@ export function PeoplePage({ source, state, onOpen, onNotice, onError, sidebarOp
   const [showHidden, setShowHidden] = useState(false)
   const [reload, setReload] = useState(0)
   const [maybe, setMaybe] = useState<{ person: PersonInfo; other: PersonInfo; score: number }[]>([])
+  const [reviewing, setReviewing] = useState<PersonInfo | null>(null)
   const revision = state.search.peopleRevision
 
   useEffect(() => {
@@ -34,6 +36,16 @@ export function PeoplePage({ source, state, onOpen, onNotice, onError, sidebarOp
   }, [source, revision, reload, showHidden])
 
   const named = people?.filter((p) => p.name !== null) ?? []
+  const toReview = named.filter((p) => p.maybe > 0)
+  const deepOn = state.settings.deepIndexing
+  const lookCloser = async () => {
+    try {
+      await window.photos.setSettings({ deepIndexing: true })
+      onNotice('Theia will look at every photo again, more closely, once it has read them all. Progress shows at the bottom.')
+    } catch (e) {
+      onError((e as Error).message)
+    }
+  }
   const unnamed = people?.filter((p) => p.name === null) ?? []
   const names = named.map((p) => p.name!)
   const indexing = state.search.indexing
@@ -118,6 +130,29 @@ export function PeoplePage({ source, state, onOpen, onNotice, onError, sidebarOp
           </section>
         )}
 
+        {toReview.length > 0 && (
+          <section className="people-section">
+            <h2>More photos of them?</h2>
+            <p className="muted small">The closer look found faces that might be these people, but not surely enough to add them without asking.</p>
+            <div className="same-grid">
+              {toReview.map((p) => (
+                <div key={p.id} className="same-card">
+                  <div className="same-faces">
+                    <button className="who-face" onClick={() => onOpen(p.id)} title="See their photos">
+                      <Face source={source} face={p.cover} size={84} />
+                      <span className="small">{p.name}</span>
+                    </button>
+                  </div>
+                  <span className="muted small maybe-count">{plural(p.maybe, 'photo')} might be {p.name}</span>
+                  <div className="same-buttons">
+                    <button className="primary small" onClick={() => setReviewing(p)}>Review</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
         {unnamed.length > 0 && (
           <section className="people-section">
             <h2>Who’s this?</h2>
@@ -145,6 +180,13 @@ export function PeoplePage({ source, state, onOpen, onNotice, onError, sidebarOp
           </section>
         )}
 
+        {people !== null && people.length > 0 && !deepOn && state.settings.indexing && (
+          <section className="people-section look-closer">
+            <p className="muted small">Missing photos of someone? Theia can look at every photo again, more closely, for faces that are small, turned or blurred, and ask you about the ones it isn’t sure of.</p>
+            <button className="ghost small" onClick={() => void lookCloser()}>Look more closely</button>
+          </section>
+        )}
+
         {people !== null && (
           <section className="people-section">
             <button className="ghost small" onClick={() => setShowHidden((s) => !s)} aria-expanded={showHidden}>
@@ -165,7 +207,114 @@ export function PeoplePage({ source, state, onOpen, onNotice, onError, sidebarOp
           </section>
         )}
       </div>
+      {reviewing && (
+        <MaybeReview
+          source={source}
+          person={reviewing}
+          onClose={() => setReviewing(null)}
+          onDone={(added) => {
+            const name = reviewing.name
+            setReviewing(null)
+            setReload((n) => n + 1)
+            if (added) onNotice(`Added ${plural(added, 'photo')} to ${name}.`)
+          }}
+          onError={onError}
+        />
+      )}
     </>
+  )
+}
+
+/**
+ * Faces that might be someone, each with the photo it is in, to answer yes or
+ * no. Answers are sent together; faces left unanswered are asked again later.
+ */
+function MaybeReview({ source, person, onClose, onDone, onError }: {
+  source: SourceId
+  person: PersonInfo
+  onClose: () => void
+  onDone: (added: number) => void
+  onError: (message: string) => void
+}) {
+  const [faces, setFaces] = useState<MaybeFace[] | null>(null)
+  const [answers, setAnswers] = useState<Map<number, boolean>>(new Map())
+  const [busy, setBusy] = useState(false)
+  const title = useId()
+  const card = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    let live = true
+    window.photos.personMaybes(source, person.id).then((f) => live && setFaces(f)).catch((e: Error) => live && onError(e.message))
+    return () => { live = false }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [source, person.id])
+  useEffect(() => { card.current?.querySelector<HTMLButtonElement>('.maybe-tile button, .dialog-buttons button')?.focus() }, [faces])
+
+  // Pressing the same answer again takes it back.
+  const answer = (face: number, yes: boolean) =>
+    setAnswers((a) => {
+      const next = new Map(a)
+      if (next.get(face) === yes) next.delete(face)
+      else next.set(face, yes)
+      return next
+    })
+  const restYes = () => setAnswers((a) => new Map([...(faces ?? []).map((f) => [f.face, true] as const), ...a]))
+  const yes = [...answers].filter(([, v]) => v).map(([k]) => k)
+  const no = [...answers].filter(([, v]) => !v).map(([k]) => k)
+  const save = async () => {
+    setBusy(true)
+    try {
+      onDone(await window.photos.answerMaybes(source, person.id, yes, no))
+    } catch (e) {
+      onError((e as Error).message)
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div
+      className="modal-scrim"
+      onMouseDown={(e) => e.target === e.currentTarget && !busy && onClose()}
+      onKeyDown={(e) => { if (e.key === 'Escape' && !busy) { e.stopPropagation(); onClose() } }}
+    >
+      <div className="confirm-dialog maybe-dialog" ref={card} role="dialog" aria-modal="true" aria-labelledby={title}>
+        <div className="maybe-head">
+          <Face source={source} face={person.cover} size={44} />
+          <div>
+            <h2 id={title}>Is this {person.name}?</h2>
+            <p className="muted small">Yes adds the photo to {person.name}. No keeps it out for good. Faces you skip are asked again later.</p>
+          </div>
+        </div>
+        {faces === null ? (
+          <p className="muted">Finding them…</p>
+        ) : faces.length === 0 ? (
+          <p className="muted">Nothing left to ask about.</p>
+        ) : (
+          <div className="maybe-grid">
+            {faces.map((f) => {
+              const a = answers.get(f.face)
+              return (
+                <div key={f.face} className={`maybe-tile ${a === true ? 'yes' : a === false ? 'no' : ''}`}>
+                  <Face source={source} face={f.face} size={88} />
+                  <img className="maybe-photo" src={mediaUrl(source, String(f.assetId), 'sm')} alt="" draggable={false} loading="lazy" />
+                  <div className="maybe-buttons">
+                    <button className={`small ${a === true ? 'primary' : 'ghost'}`} aria-pressed={a === true} onClick={() => answer(f.face, true)} aria-label={`Yes, this is ${person.name}`}>Yes</button>
+                    <button className={`small ${a === false ? 'primary' : 'ghost'}`} aria-pressed={a === false} onClick={() => answer(f.face, false)} aria-label={`No, not ${person.name}`}>No</button>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+        <div className="dialog-buttons">
+          {!!faces?.length && answers.size < faces.length && <button className="ghost" onClick={restYes} disabled={busy}>Yes to the rest</button>}
+          <button className="ghost" onClick={onClose} disabled={busy}>Cancel</button>
+          <button className="primary" onClick={() => void save()} disabled={busy || answers.size === 0}>
+            {answers.size ? `Save ${plural(answers.size, 'answer')}` : 'Save'}
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -228,6 +377,7 @@ export function PersonTitle({ source, person, names, onRenamed, onError }: {
   onError: (message: string) => void
 }) {
   const [editing, setEditing] = useState(person.name === null)
+  const [picking, setPicking] = useState(false)
   const [value, setValue] = useState(person.name ?? '')
   const input = useRef<HTMLInputElement>(null)
   const list = useId()
@@ -237,9 +387,13 @@ export function PersonTitle({ source, person, names, onRenamed, onError }: {
   if (!editing) {
     return (
       <h1 className="person-title">
-        <Face source={source} face={person.cover} size={34} />
+        <button className="person-cover-button" onClick={() => setPicking(true)} title="Choose the photo shown for them">
+          <Face source={source} face={person.cover} size={34} />
+        </button>
         <span>{person.name}</span>
         <button className="ghost small" onClick={() => setEditing(true)}>Rename</button>
+        <button className="ghost small" onClick={() => setPicking(true)}>Change photo</button>
+        {picking && <CoverPicker source={source} person={person} onClose={() => setPicking(false)} onError={onError} />}
       </h1>
     )
   }
@@ -273,5 +427,69 @@ export function PersonTitle({ source, person, names, onRenamed, onError }: {
       <button type="submit" className="primary small" disabled={!value.trim()}>Save</button>
       {person.name !== null && <button type="button" className="ghost small" onClick={() => setEditing(false)}>Cancel</button>}
     </form>
+  )
+}
+
+/** Their faces, clearest first: click one to show it for them in People and beside their name. */
+function CoverPicker({ source, person, onClose, onError }: { source: SourceId; person: PersonInfo; onClose: () => void; onError: (message: string) => void }) {
+  const [faces, setFaces] = useState<{ face: number; assetId: number }[] | null>(null)
+  const [busy, setBusy] = useState(false)
+  const title = useId()
+  const card = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    let live = true
+    window.photos.personFaces(source, person.id).then((f) => live && setFaces(f)).catch((e: Error) => live && onError(e.message))
+    return () => { live = false }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [source, person.id])
+  useEffect(() => { card.current?.querySelector<HTMLButtonElement>('.cover-choice.on, .cover-choice, button')?.focus() }, [faces])
+
+  const pick = async (face: number | null) => {
+    setBusy(true)
+    try {
+      await window.photos.setPersonCover(source, person.id, face)
+      onClose()
+    } catch (e) {
+      onError((e as Error).message)
+      setBusy(false)
+    }
+  }
+
+  return createPortal(
+    <div className="modal-scrim" onMouseDown={(e) => e.target === e.currentTarget && !busy && onClose()} onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape' && !busy) onClose() }}>
+      <div className="confirm-dialog maybe-dialog" ref={card} role="dialog" aria-modal="true" aria-labelledby={title}>
+        <div className="maybe-head">
+          <Face source={source} face={person.cover} size={44} />
+          <div>
+            <h2 id={title}>Choose {person.name ? `${person.name}’s` : 'their'} photo</h2>
+            <p className="muted small">Shown in People and beside their name. Pick a clear one.</p>
+          </div>
+        </div>
+        {faces === null ? (
+          <p className="muted">Finding their photos…</p>
+        ) : (
+          <div className="cover-grid" role="listbox" aria-label="Their faces">
+            {faces.map((f) => (
+              <button
+                key={f.face}
+                role="option"
+                aria-selected={f.face === person.cover}
+                className={`cover-choice ${f.face === person.cover ? 'on' : ''}`}
+                disabled={busy}
+                onClick={() => void pick(f.face)}
+                title={f.face === person.cover ? 'Shown now' : 'Show this one'}
+              >
+                <Face source={source} face={f.face} size={84} />
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="dialog-buttons">
+          <button className="ghost" onClick={() => void pick(null)} disabled={busy} title="Go back to the clearest, largest face">Let Theia choose</button>
+          <button className="ghost" onClick={onClose} disabled={busy}>Cancel</button>
+        </div>
+      </div>
+    </div>,
+    document.body,
   )
 }

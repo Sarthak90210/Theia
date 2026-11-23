@@ -23,6 +23,7 @@ export interface SidebarProps {
   onSource: (id: SourceId) => void
   onCollection: (id: string) => void
   onOpenVault: () => void
+  onAddFolderToVault?: () => void
   /** Show a vault's location, size, and remove or delete it. */
   onVaultOptions: (id: SourceId) => void
   onSettings: () => void
@@ -33,7 +34,7 @@ export interface SidebarProps {
  * Phones, then vaults, then whatever the selected one contains. Phones appear
  * here by themselves when plugged in and go when unplugged.
  */
-export function Sidebar({ state, source, collections, collection, onSource, onCollection, onOpenVault, onVaultOptions, onSettings, onShortcuts }: SidebarProps) {
+export function Sidebar({ state, source, collections, collection, onSource, onCollection, onOpenVault, onAddFolderToVault, onVaultOptions, onSettings, onShortcuts }: SidebarProps) {
   const noPhoneButSeen =
     state.devices.length === 0 && state.diagnosis && state.diagnosis.layers.some((l) => l.id === 'usb' && l.status === 'ok')
 
@@ -64,7 +65,7 @@ export function Sidebar({ state, source, collections, collection, onSource, onCo
             <I.Warning size={14} className="side-warn" />
           </button>
         )}
-        {state.devices.length === 0 && !noPhoneButSeen && <div className="side-empty">Plug in an iPhone</div>}
+        {state.devices.length === 0 && !noPhoneButSeen && <div className="side-empty">Plug in an iPhone or Android phone</div>}
       </div>
 
       <div className="side-section">
@@ -94,6 +95,12 @@ export function Sidebar({ state, source, collections, collection, onSource, onCo
           <I.Plus />
           <span className="side-label">Open or create vault…</span>
         </button>
+        {onAddFolderToVault && (
+          <button className="side-item subtle" onClick={onAddFolderToVault} title="Add photos from a folder on this computer">
+            <I.Folder />
+            <span className="side-label">Add photos from folder…</span>
+          </button>
+        )}
       </div>
 
       {collections && (

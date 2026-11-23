@@ -1,0 +1,299 @@
+/* The right-click menu on photos, the timeline beside the grid, the viewer's
+   filmstrip, the slideshow and the resize dialog. */
+
+/* -------------------------------------------------------------- the menu */
+
+.item-menu {
+  position: fixed;
+  z-index: 200;
+  display: flex;
+  align-items: flex-start;
+  font-size: 13px;
+}
+.item-menu-main,
+.item-submenu {
+  min-width: 268px;
+  padding: 6px;
+  border-radius: 14px;
+  background: var(--glass-strong, var(--surface));
+  border: 1px solid var(--glass-border, var(--line));
+  box-shadow: var(--glass-edge, none), 0 18px 50px rgb(0 0 0 / 32%);
+  -webkit-backdrop-filter: blur(30px) saturate(1.6);
+  backdrop-filter: blur(30px) saturate(1.6);
+  animation: item-menu-in 0.14s ease-out;
+}
+@keyframes item-menu-in { from { opacity: 0; transform: translateY(-4px) scale(0.98); } to { opacity: 1; transform: none; } }
+
+.item-menu-top {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 2px;
+  padding: 2px 0 4px;
+}
+.item-menu button.item-menu-tile {
+  border: 0;
+  box-shadow: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 58px;
+  padding: 8px 4px;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+}
+.item-menu button.item-menu-tile:hover:not(:disabled),
+.item-menu button.item-menu-tile:focus-visible { background: var(--hover, var(--accent-soft)); outline: none; }
+
+.item-menu button.item-menu-row {
+  border: 0;
+  box-shadow: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font-size: 13px;
+}
+.item-menu button.item-menu-row:hover:not(:disabled),
+.item-menu button.item-menu-row:focus-visible,
+.item-menu button.item-menu-row.open { background: var(--hover, var(--accent-soft)); outline: none; }
+.item-menu button.item-menu-tile:disabled,
+.item-menu button.item-menu-row:disabled { opacity: 0.4; background: transparent; }
+.item-menu-icon { display: inline-flex; width: 18px; justify-content: center; flex: 0 0 auto; }
+.item-menu-label { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.item-menu-key {
+  margin-left: 18px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  padding: 0;
+}
+.item-menu-chevron { color: var(--muted); }
+.item-menu-line { height: 1px; margin: 5px 6px; background: var(--line); }
+.item-menu-note { padding: 6px 10px 4px; font-size: 11px; color: var(--muted); max-width: 240px; line-height: 1.4; }
+
+.item-submenu {
+  position: absolute;
+  left: calc(100% + 4px);
+  min-width: 230px;
+}
+.item-submenu.left { left: auto; right: calc(100% + 4px); }
+.spinner.small { width: 12px; height: 12px; border-width: 2px; }
+
+/* ------------------------------------------------------------- timeline */
+
+.grid-wrap {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+/* The timeline is the scrollbar here. */
+.grid.with-timeline { scrollbar-width: none; }
+.grid.with-timeline::-webkit-scrollbar { width: 0; }
+
+.timeline {
+  position: absolute;
+  right: 4px;
+  width: 50px;
+  /* Over the photos, under the viewer (5). */
+  z-index: 4;
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+}
+.timeline::before {
+  /* The rail itself: faint until the pointer is over it. */
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 6px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--line);
+  opacity: 0.6;
+  transition: opacity 0.15s;
+}
+.timeline:hover::before { opacity: 1; }
+.timeline-year {
+  position: absolute;
+  right: 14px;
+  transform: translateY(-50%);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  text-shadow: 0 0 6px var(--bg);
+  pointer-events: none;
+}
+.timeline-dot {
+  position: absolute;
+  right: 6px;
+  width: 3px;
+  height: 3px;
+  margin: -1.5px -0.5px 0 0;
+  border-radius: 50%;
+  background: var(--muted);
+  opacity: 0.7;
+  pointer-events: none;
+}
+.timeline-view {
+  /* How much of the library is on screen. */
+  position: absolute;
+  right: 4px;
+  width: 6px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--text) 18%, transparent);
+  pointer-events: none;
+}
+.timeline-here {
+  position: absolute;
+  right: 2px;
+  width: 22px;
+  height: 3px;
+  margin-top: -1.5px;
+  border-radius: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--bg) 60%, transparent);
+  pointer-events: none;
+}
+.timeline-tip {
+  /* Left of the year labels, so it never covers one. */
+  position: absolute;
+  right: 54px;
+  transform: translateY(-50%);
+  padding: 4px 10px;
+  border-radius: 8px;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--glass-strong, var(--surface));
+  border: 1px solid var(--glass-border, var(--line));
+  box-shadow: 0 6px 20px rgb(0 0 0 / 28%);
+  pointer-events: none;
+}
+
+/* ------------------------------------------------------------ filmstrip */
+
+.item-strip {
+  display: flex;
+  gap: 4px;
+  padding: 8px 16px 12px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  flex: 0 0 auto;
+}
+.strip-item {
+  position: relative;
+  flex: 0 0 auto;
+  width: 64px;
+  height: 64px;
+  min-height: 0;
+  padding: 0;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface);
+  border: 2px solid transparent;
+  opacity: 0.7;
+  transition: opacity 0.15s, border-color 0.15s;
+}
+.strip-item img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.strip-item:hover { opacity: 1; }
+.strip-item.on { opacity: 1; border-color: var(--accent); }
+.strip-video { position: absolute; right: 3px; bottom: 3px; color: #fff; filter: drop-shadow(0 0 2px #000); display: flex; }
+
+/* ------------------------------------------------------------ slideshow */
+
+.slideshow {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  background: #000;
+  cursor: none;
+  outline: none;
+}
+.slideshow.awake { cursor: default; }
+.slideshow-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  opacity: 0;
+  transition: opacity 0.9s ease;
+}
+.slideshow-img.shown { opacity: 1; }
+.slideshow-bar {
+  position: absolute;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px 6px 16px;
+  border-radius: 999px;
+  color: #fff;
+  background: rgb(20 20 24 / 62%);
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+  opacity: 0;
+  transition: opacity 0.3s;
+  pointer-events: none;
+}
+.slideshow.awake .slideshow-bar { opacity: 1; pointer-events: auto; }
+.slideshow-bar button { color: #fff; }
+.slideshow-when { font-size: 12px; margin-right: 8px; opacity: 0.85; white-space: nowrap; }
+.slideshow-speed select { background: transparent; color: #fff; border: 1px solid rgb(255 255 255 / 25%); border-radius: 8px; padding: 3px 6px; }
+.slideshow-speed option { color: #000; }
+.slideshow-empty { position: absolute; inset: 0; display: grid; place-items: center; color: #ccc; }
+
+/* --------------------------------------------------------------- resize */
+
+.resize-dialog {
+  width: min(100% - 32px, 460px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 24px;
+  border-radius: 22px;
+  background: var(--glass-strong, var(--surface));
+  border: 1px solid var(--glass-border, var(--line));
+  box-shadow: var(--shadow);
+}
+.resize-dialog h2 { font-size: 18px; font-weight: 600; margin: 0; }
+.resize-presets { display: flex; flex-direction: column; gap: 6px; }
+.resize-preset {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: center;
+  gap: 4px 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  cursor: pointer;
+}
+.resize-preset.on { border-color: var(--accent); background: var(--accent-soft); }
+.resize-preset input[type='radio'] { accent-color: var(--accent); margin: 0; }
+.resize-custom { display: flex; align-items: center; gap: 6px; grid-column: 1 / -1; padding-left: 24px; }
+.resize-custom input { width: 88px; padding: 5px 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--text); }
+.resize-format { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; font-size: 13px; }
+.resize-format select { margin-left: 6px; padding: 4px 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--text); }
+.resize-quality { display: flex; align-items: center; gap: 8px; }
+.resize-quality input { accent-color: var(--accent); }
+.resize-dialog .dialog-buttons { display: flex; gap: 8px; justify-content: flex-end; }

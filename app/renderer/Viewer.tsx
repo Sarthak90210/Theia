@@ -18,6 +18,9 @@ export interface ViewerProps {
   onSidebar: () => void
   sidebarOpen: boolean
   onContextMenu?: (e: React.MouseEvent, index: number) => void
+  /** A strip of the photos around this one along the bottom; F shows and hides it. */
+  filmstrip?: boolean
+  onFilmstrip?: () => void
   saveButton: React.ReactNode
   converting: AppState['converting']
   /** Save button for one burst frame (phones: frames are items of their own). */
@@ -35,7 +38,7 @@ const MAX_SCALE = 8
  * Wheel or double-click zooms, dragging pans. Bursts get a filmstrip of
  * their frames.
  */
-export function Viewer({ source, items, index, infoOpen, onIndex, onClose, onInfo, onSidebar, sidebarOpen, onContextMenu, saveButton, converting, frameSave, onBurstChanged, onError }: ViewerProps) {
+export function Viewer({ source, items, index, infoOpen, onIndex, onClose, onInfo, onSidebar, sidebarOpen, onContextMenu, filmstrip, onFilmstrip, saveButton, converting, frameSave, onBurstChanged, onError }: ViewerProps) {
   const item = items[index]
   const root = useRef<HTMLDivElement>(null)
   const [frames, setFrames] = useState<string[] | null>(null)
@@ -148,6 +151,7 @@ export function Viewer({ source, items, index, infoOpen, onIndex, onClose, onInf
     else if (e.key === '-' && zoomable) zoomBy(1 / 1.5)
     else if (e.key === '0' && zoomable) setView({ scale: 1, x: 0, y: 0 })
     else if (e.key.toLowerCase() === 'i' && !e.ctrlKey) onInfo()
+    else if (e.key.toLowerCase() === 'f' && !e.ctrlKey && !e.altKey && onFilmstrip) onFilmstrip()
     else return
     e.preventDefault()
   }
@@ -179,7 +183,7 @@ export function Viewer({ source, items, index, infoOpen, onIndex, onClose, onInf
           </button>
         </div>
       </Glass>
-      <div className="viewer-stage" onContextMenu={(e) => onContextMenu?.(e, index)}>
+      <div className="viewer-stage" onContextMenu={(e) => { e.preventDefault(); onContextMenu?.(e, index) }}>
         {isVideo ? (
           <VideoPlayer key={item.key} ref={player} source={source} item={item} converting={converting} />
         ) : (
@@ -236,6 +240,7 @@ export function Viewer({ source, items, index, infoOpen, onIndex, onClose, onInf
           </div>
         </div>
       )}
+      {filmstrip && items.length > 1 && <Strip source={source} items={items} index={index} onIndex={onIndex} />}
     </div>
   )
 }
@@ -255,6 +260,12 @@ function Media({ source, item, shownKey, view, onView, zoomBy }: MediaProps) {
   const box = useRef<HTMLDivElement>(null)
   const fullImg = useRef<HTMLImageElement>(null)
   const drag = useRef<{ x: number; y: number; vx: number; vy: number } | null>(null)
+
+  useEffect(() => {
+    if (fullImg.current?.complete && fullImg.current?.naturalWidth > 0) {
+      setFull(true)
+    }
+  }, [shownKey, source])
 
   // Cursor position relative to the stage centre, which is the zoom origin.
   const centred = (e: { clientX: number; clientY: number }) => {
@@ -344,4 +355,38 @@ function Media({ source, item, shownKey, view, onView, zoomBy }: MediaProps) {
 function fittedScale(img: HTMLImageElement, box: HTMLElement): number {
   const fit = Math.min((box.clientWidth - 24) / img.naturalWidth, (box.clientHeight - 24) / img.naturalHeight)
   return Math.min(MAX_SCALE, 1 / Math.min(1, fit)) / window.devicePixelRatio
+}
+
+/** How many photos either side of the current one the strip holds. */
+const STRIP_REACH = 60
+
+/** The photos around this one, small, the current one in the middle. */
+function Strip({ source, items, index, onIndex }: { source: SourceId; items: GalleryItem[]; index: number; onIndex: (i: number) => void }) {
+  const box = useRef<HTMLDivElement>(null)
+  const from = Math.max(0, index - STRIP_REACH)
+  const to = Math.min(items.length, index + STRIP_REACH + 1)
+  useEffect(() => {
+    const el = box.current?.querySelector<HTMLElement>('.strip-item.on')
+    el?.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' })
+  }, [index])
+  return (
+    <div className="item-strip" ref={box} aria-label="Filmstrip">
+      {items.slice(from, to).map((it, j) => {
+        const i = from + j
+        return (
+          <button
+            key={it.key}
+            className={`strip-item ${i === index ? 'on' : ''}`}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => onIndex(i)}
+            aria-label={`Photo ${i + 1}`}
+            aria-current={i === index}
+          >
+            <img src={`${mediaUrl(source, it.key, 'sm')}&r=${it.revision ?? 0}`} alt="" loading="lazy" draggable={false} />
+            {it.kind === 'video' && <span className="strip-video"><I.Play size={10} /></span>}
+          </button>
+        )
+      })}
+    </div>
+  )
 }

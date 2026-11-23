@@ -29,6 +29,15 @@ export interface PersonInfo {
   photos: number
   /** A face id to show for them (mediaUrl(source, String(cover), 'face')). */
   cover: number | null
+  /** Photos that might be them too, to answer yes or no (found by the closer look). */
+  maybe: number
+}
+
+/** A face that might be someone named: its picture, the photo, and how alike. */
+export interface MaybeFace {
+  face: number
+  assetId: number
+  score: number
 }
 
 export const PERSON_PREFIX = 'person:'
@@ -43,6 +52,8 @@ export type SourceId = string
 export interface DeviceInfo {
   id: SourceId
   udid: string
+  /** iPhones are read over Apple's own connection; Android phones through Windows' portable devices. */
+  platform: 'iphone' | 'android'
   name: string
   state: 'opening' | 'ready' | 'problem'
   error: string | null
@@ -76,7 +87,7 @@ export type SaveState =
       bytesPerSecond?: number
       /** Time left for the copy and its read-back check. Null while estimating. */
       etaMs?: number | null
-      phase?: 'copying' | 'verifying' | 'finishing' | 'checking-deletion' | 'deleting'
+      phase?: 'copying' | 'verifying' | 'finishing' | 'checking-deletion' | 'deleting' | 'recycling-originals'
       current: string | null
     }
   | {
@@ -89,7 +100,8 @@ export type SaveState =
       skippedCloud: number
       failed: { item: string; file: string; reason: string }[]
       cancelled: boolean
-      cleanup?: { deleted: number; kept: number; reasons: { item: string; reason: string }[] }
+      /** What was deleted at the source afterwards: from the iPhone, or originals from a folder (to the Recycle Bin). */
+      cleanup?: { from?: 'iphone' | 'folder'; deleted: number; kept: number; reasons: { item: string; reason: string }[] }
     }
   | { status: 'error'; target: string; error: string }
 
@@ -115,9 +127,10 @@ export interface AppState {
     /**
      * Search and people indexing of one vault, by step: reading every photo
      * (search by meaning, text, faces), then grouping faces into people.
-     * Null when there is nothing left to do.
+     * 'deep': the optional closer look, after both (Settings). Null when there
+     * is nothing left to do.
      */
-    indexing: { vault: string; step: 'reading' | 'people'; done: number; total: number } | null
+    indexing: { vault: string; step: 'reading' | 'people' | 'deep'; done: number; total: number } | null
     /** Where search by meaning and text reading run: the graphics card, the processor, or not decided yet. */
     devices: { embed: 'gpu' | 'cpu' | null; ocr: 'gpu' | 'cpu' | null }
     /** Faces are being grouped into people (bundled models, and switched on in Settings). */
@@ -264,6 +277,43 @@ export interface PhotosApi {
   namePerson(source: SourceId, id: number, name: string): Promise<{ person: number; merged: boolean }>
   /** "Not this person": these photos leave them and are never put back. */
   removeFromPerson(source: SourceId, id: number, keys: string[]): Promise<number>
+  /**
+   * Add photos and videos from a folder on this computer to a vault. Resolves
+   * once the folder is read; the copying carries on in the status bar.
+   */
+  addFolderToVault(vaultId?: SourceId, folderPath?: string, opts?: { deleteSources?: boolean }): Promise<{ count: number; vaultName: string } | null>
+  /** Add chosen or dropped files and folders to a vault, the same way. */
+  addFilesToVault(vaultId?: SourceId, filePaths?: string[], opts?: { deleteSources?: boolean }): Promise<{ count: number; vaultName: string } | null>
+  /** Where a file dropped on the window is on disk. Electron no longer puts it on File itself. */
+  pathForFile(file: File): string
+  /** Copy, as File Explorer does: the files, and the picture too for a single photo. */
+  copyItems(source: SourceId, keys: string[]): Promise<void>
+  /** "Copy as path": each original's path in quotes, one per line. Vaults only. */
+  itemPaths(source: SourceId, keys: string[]): Promise<string>
+  /** The Windows share sheet, over `at` (a point on screen). Resolves when it is up. */
+  shareItems(source: SourceId, keys: string[], at: { x: number; y: number }): Promise<void>
+  /** The Windows print dialog for one photo. */
+  printItem(source: SourceId, key: string): Promise<void>
+  /** A copy of the originals elsewhere: Save As for one, a folder for several. Where, or null if cancelled. */
+  saveItemsAs(source: SourceId, keys: string[]): Promise<string | null>
+  /** The apps Windows offers for the item's file, its default first. */
+  openWithChoices(source: SourceId, key: string): Promise<{ id: string; label: string }[]>
+  /** Open in another app: an id from openWithChoices, or 'choose' for Windows' own picker. */
+  openItemWith(source: SourceId, key: string, id: string): Promise<void>
+  /** Desktop background or lock screen picture. */
+  setItemAs(source: SourceId, key: string, where: 'desktop' | 'lock'): Promise<void>
+  /** A resized copy, saved where the person chooses. Where, or null if cancelled. */
+  resizeItem(source: SourceId, key: string, opts: { width: number; height: number; format: 'jpeg' | 'png' | 'webp'; quality: number }): Promise<string | null>
+  /** This person's faces in visible photos, clearest first: what their picture can be chosen from. */
+  personFaces(source: SourceId, id: number): Promise<{ face: number; assetId: number }[]>
+  /** Show this face as their picture (null: let Theia choose). */
+  setPersonCover(source: SourceId, id: number, face: number | null): Promise<void>
+  /** Show their face in this photo as their picture. */
+  setPersonCoverFromPhoto(source: SourceId, id: number, key: string): Promise<void>
+  /** Faces that might be this person, found by the closer look, most alike first. */
+  personMaybes(source: SourceId, id: number): Promise<MaybeFace[]>
+  /** Yes adds those faces to the person; no keeps them out for good. Resolves to how many were added. */
+  answerMaybes(source: SourceId, id: number, yes: number[], no: number[]): Promise<number>
   /** Leave someone out of People (a stranger in the background). */
   hidePerson(source: SourceId, id: number, hidden: boolean): Promise<void>
   /** Groups that might be the same person as someone else, to ask about. */
@@ -286,6 +336,22 @@ export const INVOKE_CHANNELS = [
   'storyboard',
   'openVault',
   'closeVault',
+  'addFolderToVault',
+  'addFilesToVault',
+  'personFaces',
+  'setPersonCover',
+  'setPersonCoverFromPhoto',
+  'personMaybes',
+  'answerMaybes',
+  'copyItems',
+  'itemPaths',
+  'shareItems',
+  'printItem',
+  'saveItemsAs',
+  'openWithChoices',
+  'openItemWith',
+  'setItemAs',
+  'resizeItem',
   'vaultDetails',
   'setUpProtection',
   'unlockVault',

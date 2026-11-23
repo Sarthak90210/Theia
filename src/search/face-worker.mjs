@@ -22,7 +22,7 @@ parentPort.on('message', (msg) => {
         return
       }
       ready ??= loadFaces(modelDir, { threads })
-      const read = await readFaces(await ready, msg.file)
+      const read = await readFaces(await ready, msg.file, { deep: !!msg.deep })
       parentPort.postMessage({ id: msg.id, ...read })
     } catch (e) {
       parentPort.postMessage({ id: msg.id, error: e?.message ?? String(e) })

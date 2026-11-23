@@ -200,10 +200,16 @@ export async function runSearchJobs(db: Db, queue: JobQueue, cacheRoot: string, 
 
 /** Erase what was read from items just hidden or deleted. They are read again if they come back. */
 export function forgetSearchData(db: Db, ids: number[]): void {
-  const stmts = Object.values(STAGES).flatMap((s) => [
-    db.prepare(`DELETE FROM ${s.table} WHERE asset_id = ?`),
-    db.prepare(`DELETE FROM job WHERE kind = '${s.kind}' AND asset_id = ?`),
-  ])
+  const stmts = [
+    ...Object.values(STAGES).flatMap((s) => [
+      db.prepare(`DELETE FROM ${s.table} WHERE asset_id = ?`),
+      db.prepare(`DELETE FROM job WHERE kind = '${s.kind}' AND asset_id = ?`),
+    ]),
+    // The closer look's (src/search/deep.ts).
+    db.prepare(`DELETE FROM embedding_part WHERE asset_id = ?`),
+    db.prepare(`DELETE FROM deep_scan WHERE asset_id = ?`),
+    db.prepare(`DELETE FROM job WHERE kind = 'deep' AND asset_id = ?`),
+  ]
   db.transaction(() => {
     for (const id of ids) for (const s of stmts) s.run(id)
   })()
@@ -235,6 +241,11 @@ export interface SearchHit {
  *   match at the same rank: "aadhar" puts the card first.
  * - by name: the place it was taken or an album it is in contains the query,
  *   so "kyoto" finds Kyoto even when Kyoto looks like anywhere.
+ * - by meaning, in part of the photo: photos given a closer look (deep.ts)
+ *   also have vectors for their quarters and middle. Each photo's best part
+ *   is ranked like the whole photos, with its own cut-off, as a list of its
+ *   own: a dog in a corner of a wide shot is found without every busy photo
+ *   outranking the clear matches.
  *
  * With nothing left after the filter ("photos from 2024"), the filter alone
  * is the answer, newest first.
@@ -287,6 +298,7 @@ export function searchVault(
     if (keep < 0) keep = semantic.length
     semantic.length = Math.min(keep, limit)
   }
+  const parts = query ? partMatches(db, query, ok, limit) : []
 
   const written = opts.text === false ? [] : textMatches(db, parsed.text, limit).filter((h) => ok(h.assetId))
   const named = nameMatches(db, parsed.text, limit).filter(ok)
@@ -299,6 +311,8 @@ export function searchVault(
     fused.set(id, f)
   }
   semantic.forEach((h, i) => add(h.id, i, h.score, 1))
+  // A little below the whole photo: a part matching is weaker evidence.
+  parts.forEach((h, i) => add(h.id, i, fused.get(h.id)?.score ?? h.score, 0.85))
   written.forEach((h, i) => add(h.assetId, i, null, h.full ? 1.1 : 0.8))
   // A place or album name that contains the query is the more literal match,
   // so at the same rank it goes first.
@@ -307,6 +321,29 @@ export function searchVault(
     .sort((a, b) => b[1].rrf - a[1].rrf || (b[1].score ?? -1) - (a[1].score ?? -1))
     .slice(0, limit)
     .map(([assetId, f]) => ({ assetId, score: f.score }))
+}
+
+/** Each photo's best-matching part (deep.ts), best first, above that list's own cut-off. */
+function partMatches(db: Db, query: Float32Array, ok: (id: number) => boolean, limit: number): { id: number; score: number }[] {
+  const best = new Map<number, number>()
+  const rows = db
+    .prepare(
+      `SELECT p.asset_id, p.vec FROM embedding_part p JOIN asset a ON a.id = p.asset_id
+        WHERE p.model = ? AND a.hidden = 0 AND a.deleted_at IS NULL`,
+    )
+    .iterate(MODEL_KEY) as Iterable<{ asset_id: number; vec: Buffer }>
+  for (const r of rows) {
+    const v = new Float32Array(r.vec.buffer, r.vec.byteOffset, r.vec.byteLength / 4)
+    if (v.length !== query.length) continue
+    let s = 0
+    for (let i = 0; i < v.length; i++) s += v[i]! * query[i]!
+    if (s > (best.get(r.asset_id) ?? -Infinity)) best.set(r.asset_id, s)
+  }
+  if (!best.size) return []
+  const all = [...best.values()].sort((a, b) => b - a)
+  const hits = [...best].filter(([id]) => ok(id)).map(([id, score]) => ({ id, score })).sort((a, b) => b.score - a.score)
+  const cutoff = relevanceCutoff(all, hits[0]?.score)
+  return hits.filter((h) => h.score >= cutoff).slice(0, limit)
 }
 
 /**

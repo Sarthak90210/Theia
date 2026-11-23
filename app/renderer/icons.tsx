@@ -283,3 +283,76 @@ export const Lock = (p: P) => (
     <path d="M6.8 9V6.5a3.2 3.2 0 0 1 6.4 0V9M10 12.3v2" />
   </Svg>
 )
+
+export const Copy = (p: P) => (
+  <Svg {...p}>
+    <rect x="7" y="7" width="10" height="10.5" rx="2" />
+    <path d="M13 7V4.5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2V11a2 2 0 0 0 2 2h2" />
+  </Svg>
+)
+
+export const Share = (p: P) => (
+  <Svg {...p}>
+    <path d="M7.5 6.5h-2a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2v-7a2 2 0 0 0-2-2h-2" />
+    <path d="M10 12.5V2.5M6.8 5.5 10 2.3l3.2 3.2" />
+  </Svg>
+)
+
+export const Print = (p: P) => (
+  <Svg {...p}>
+    <path d="M5.5 7V3h9v4" />
+    <rect x="2.5" y="7" width="15" height="7.5" rx="1.8" />
+    <path d="M5.5 12h9v5.5h-9z" />
+  </Svg>
+)
+
+export const SaveAs = (p: P) => (
+  <Svg {...p}>
+    <path d="M4.5 3h9l3 3v9.5a1.5 1.5 0 0 1-1.5 1.5H4.5A1.5 1.5 0 0 1 3 15.5v-11A1.5 1.5 0 0 1 4.5 3Z" />
+    <path d="M6.5 3v4h6V3M6.5 17v-5h7v5" />
+  </Svg>
+)
+
+export const OpenWith = (p: P) => (
+  <Svg {...p}>
+    <rect x="2.5" y="2.5" width="6" height="6" rx="1.3" />
+    <rect x="11.5" y="2.5" width="6" height="6" rx="1.3" />
+    <rect x="2.5" y="11.5" width="6" height="6" rx="1.3" />
+    <circle cx="14.5" cy="14.5" r="3" />
+  </Svg>
+)
+
+export const Path = (p: P) => (
+  <Svg {...p}>
+    <rect x="2.5" y="4" width="15" height="12" rx="2" />
+    <path d="M5.5 12.5 8 7.5M10 12.5h4" />
+  </Svg>
+)
+
+export const Resize = (p: P) => (
+  <Svg {...p}>
+    <rect x="2.5" y="2.5" width="15" height="15" rx="2" />
+    <path d="M7 13h-2v-2M5 13l4-4M13 7h2v2M15 7l-4 4" />
+  </Svg>
+)
+
+export const SetAs = (p: P) => (
+  <Svg {...p}>
+    <rect x="2.5" y="3.5" width="15" height="10.5" rx="1.8" />
+    <path d="m5 11.5 3-3 2.5 2.5 2-2 2.5 2.5M7.5 17h5M10 14v3" />
+  </Svg>
+)
+
+export const Filmstrip = (p: P) => (
+  <Svg {...p}>
+    <rect x="2.5" y="3" width="15" height="14" rx="2" />
+    <path d="M2.5 13h15M6.5 13v4M10 13v4M13.5 13v4" />
+  </Svg>
+)
+
+export const Slideshow = (p: P) => (
+  <Svg {...p}>
+    <rect x="2.5" y="3" width="15" height="12" rx="2" />
+    <path d="m8.5 6.5 4 2.5-4 2.5zM7 17.5h6" />
+  </Svg>
+)

@@ -22,7 +22,8 @@ export interface OcrResult {
 
 /** Reads the text in a photo, line by line, top to bottom. */
 export interface ReadText {
-  read(file: string): Promise<OcrResult>
+  /** `deep`: also read overlapping tiles at nearly full resolution, for small print. Several times slower. */
+  read(file: string, opts?: { deep?: boolean }): Promise<OcrResult>
 }
 
 /** PaddleOCR in a worker thread (ocr-worker.mjs). */
@@ -44,8 +45,8 @@ export class OcrReader implements ReadText {
     return Object.keys(OCR_FILES).every((f) => fs.existsSync(path.join(modelDir, f)))
   }
 
-  async read(file: string): Promise<OcrResult> {
-    const { width, height, lines } = await this.worker.ask({ file })
+  async read(file: string, opts: { deep?: boolean } = {}): Promise<OcrResult> {
+    const { width, height, lines } = await this.worker.ask({ file, deep: !!opts.deep })
     return { width, height, lines }
   }
 

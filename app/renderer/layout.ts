@@ -142,3 +142,80 @@ export function rowOf(rows: Row[], index: number): TileRow | null {
   const r = found >= 0 ? rows[found]! : null
   return r && r.kind === 'tiles' && index < r.end ? r : null
 }
+
+/* --------------------------------------------------------------- timeline */
+
+/** Where each month starts in the grid: the top of the row holding its first item. */
+export interface MonthMark {
+  top: number
+  year: number
+  /** 0 to 11. */
+  month: number
+  /** Index of the month's first item. */
+  index: number
+}
+
+/** Month starts, oldest first, from items in capture order. */
+export function monthMarks(items: GalleryItem[], rows: Row[]): MonthMark[] {
+  const out: MonthMark[] = []
+  let last = ''
+  for (let i = 0; i < items.length; i++) {
+    const d = wall(items[i]!.t, items[i]!.off)
+    const k = `${d.getUTCFullYear()}-${d.getUTCMonth()}`
+    if (k === last) continue
+    last = k
+    const row = rowOf(rows, i)
+    if (row) out.push({ top: row.top, year: d.getUTCFullYear(), month: d.getUTCMonth(), index: i })
+  }
+  return out
+}
+
+export interface TimelinePlan {
+  /** Year labels that fit, at their place on the rail. */
+  years: { y: number; year: number; index: number }[]
+  /** One dot per other month, where there is room. */
+  dots: { y: number; index: number }[]
+}
+
+/**
+ * The rail beside the grid: the whole scroll height drawn in `rail` pixels.
+ * Each year is labelled where it starts, unless that would crowd the label
+ * above it; the newest year is always labelled, as that is where the grid
+ * opens. Months between get dots, skipped where they would touch.
+ */
+export function planTimeline(marks: MonthMark[], contentHeight: number, rail: number, opts = { labelGap: 20, dotGap: 6 }): TimelinePlan {
+  const y = (top: number) => (contentHeight > 0 ? Math.max(0, Math.min(rail, (top / contentHeight) * rail)) : 0)
+  const starts = marks.filter((m, i) => i === 0 || marks[i - 1]!.year !== m.year)
+  const years: TimelinePlan['years'] = []
+  for (const m of starts) {
+    const at = y(m.top)
+    if (years.length && at - years[years.length - 1]!.y < opts.labelGap) continue
+    years.push({ y: at, year: m.year, index: m.index })
+  }
+  const newest = starts[starts.length - 1]
+  if (newest && years[years.length - 1]?.year !== newest.year) {
+    const at = y(newest.top)
+    // Make room for it by dropping the labels it would crowd.
+    while (years.length && at - years[years.length - 1]!.y < opts.labelGap) years.pop()
+    years.push({ y: at, year: newest.year, index: newest.index })
+  }
+  const dots: TimelinePlan['dots'] = []
+  const taken = years.map((l) => l.y)
+  for (const m of marks) {
+    const at = y(m.top)
+    if (taken.some((t) => Math.abs(t - at) < opts.labelGap / 2)) continue
+    if (dots.length && at - dots[dots.length - 1]!.y < opts.dotGap) continue
+    dots.push({ y: at, index: m.index })
+  }
+  return { years, dots }
+}
+
+/** The month at a point on the rail: the last that starts at or above it. */
+export function markAt(marks: MonthMark[], contentY: number): MonthMark | null {
+  let found: MonthMark | null = null
+  for (const m of marks) {
+    if (m.top > contentY) break
+    found = m
+  }
+  return found ?? marks[0] ?? null
+}

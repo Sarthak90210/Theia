@@ -52,7 +52,8 @@ export interface ClusterResult {
 
 /** Finds faces in a photo, and groups faces into people. */
 export interface ReadFaces {
-  read(file: string): Promise<FaceResult>
+  /** `deep`: the closer look (see face-core.mjs). Several times slower. */
+  read(file: string, opts?: { deep?: boolean }): Promise<FaceResult>
   cluster(input: ClusterInput): Promise<ClusterResult>
 }
 
@@ -73,8 +74,8 @@ export class FaceReader implements ReadFaces {
     return Object.keys(FACE_FILES).every((f) => fs.existsSync(path.join(modelDir, f)))
   }
 
-  async read(file: string): Promise<FaceResult> {
-    const { width, height, faces } = await this.worker.ask({ kind: 'read', file })
+  async read(file: string, opts: { deep?: boolean } = {}): Promise<FaceResult> {
+    const { width, height, faces } = await this.worker.ask({ kind: 'read', file, deep: !!opts.deep })
     return { width, height, faces }
   }
 

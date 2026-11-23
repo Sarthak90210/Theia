@@ -67,7 +67,7 @@
   mix-blend-mode: soft-light;
 }
 
-/* Buttons on glass: no box of their own, a soft highlight, a springy press. */
+/* Buttons on glass: no box of their own, a soft highlight, no jumping or shifting on press. */
 .glass-group { gap: 2px; padding: 3px; min-height: 40px; }
 .glass-group button, .glass-group .menu-anchor > button {
   background: transparent;
@@ -76,19 +76,21 @@
   border-radius: 999px;
   min-height: 34px;
   padding: 0 14px;
-  transition: background 0.15s, transform 0.28s var(--spring), color 0.15s;
+  transition: background 0.15s, box-shadow 0.15s, color 0.15s, opacity 0.15s;
 }
 .glass-group button.icon { width: 34px; padding: 0; justify-content: center; }
 .glass-group button:hover { background: var(--hover); }
-.glass-group button:active { transform: scale(0.94); }
+.glass-group button:active { opacity: 0.82; }
 .glass-group button.on, .glass-group button[aria-pressed='true'] { background: var(--accent-soft); }
 .glass-group button.primary, .glass-group .menu-anchor > button.primary { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
 .glass-group button.primary:hover { filter: brightness(1.08); }
 .glass-round { padding: 3px; }
 
-/* Buttons everywhere else press the same way. */
-button { transition: background 0.15s, transform 0.28s var(--spring), box-shadow 0.2s, color 0.15s; }
-button:active:not(:disabled) { transform: scale(0.96); }
+/* Buttons everywhere else press the same way. Dimming only: setting transform
+   here would replace the transform that centres some buttons (the viewer
+   arrows, the big play button, the vault ⋯ button) and make them jump. */
+button { transition: background 0.15s, box-shadow 0.15s, color 0.15s, opacity 0.15s; }
+button:active:not(:disabled) { opacity: 0.82; }
 
 /* ---------------------------------------------------- the floating toolbar */
 
@@ -173,8 +175,16 @@ button:active:not(:disabled) { transform: scale(0.96); }
   z-index: 25;
   max-width: calc(100% - 40px);
   animation: rise-in 0.38s var(--spring);
+  /* When a save status bar is showing below, lift the selection bar above it */
+  transition: bottom 0.22s ease;
 }
-.glass-group.selection-bar { margin: 0; border: 0; padding: 5px 6px 5px 16px; gap: 8px; min-height: 48px; flex-wrap: wrap; }
+.main:has(> .status) .floating-bottom { bottom: 76px; }
+.floating-bottom .menu {
+  top: auto;
+  bottom: calc(100% + 10px);
+  transform-origin: bottom center;
+}
+.glass-group.selection-bar { margin: 0; border: 0; padding: 5px 6px 5px 16px; gap: 8px; min-height: 48px; flex-wrap: nowrap; }
 .selection-bar .selection-count { font-weight: 600; margin-right: 6px; white-space: nowrap; }
 @keyframes rise-in { from { opacity: 0; transform: translate(-50%, 14px) scale(0.96); } to { opacity: 1; transform: translate(-50%, 0) scale(1); } }
 
@@ -184,9 +194,9 @@ button:active:not(:disabled) { transform: scale(0.96); }
   left: 18px;
   bottom: 18px;
   z-index: 24;
-  max-width: min(720px, calc(100% - 36px));
+  max-width: min(960px, calc(100% - 36px));
   min-height: 0;
-  padding: 9px 16px;
+  padding: 8px 16px;
   border-radius: 20px;
   background: var(--glass-tint-strong);
   -webkit-backdrop-filter: blur(24px) saturate(1.7);
@@ -210,7 +220,7 @@ button:active:not(:disabled) { transform: scale(0.96); }
   box-shadow: var(--glass-rim), var(--glass-lift) !important;
   border-radius: 26px !important;
 }
-.side-item { transition: background 0.15s, transform 0.28s var(--spring); }
+.side-item { transition: background 0.15s, box-shadow 0.15s, color 0.15s, opacity 0.15s; }
 .side-item.active { background: color-mix(in srgb, var(--accent) 16%, transparent); }
 .side-item:hover:not(.active) { background: var(--hover); }
 
@@ -224,8 +234,19 @@ button:active:not(:disabled) { transform: scale(0.96); }
   box-shadow: var(--glass-rim), 0 18px 50px rgb(0 0 0 / 28%) !important;
   transform-origin: top right;
   animation: pop-in 0.26s var(--spring);
+  display: flex;
+  flex-direction: column;
+  white-space: normal;
 }
-.menu-item { border-radius: 12px !important; }
+.menu-item {
+  border-radius: 12px !important;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  box-sizing: border-box;
+}
+.menu-item span { min-width: 0; }
+.menu-item span:nth-child(2) { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; }
 @keyframes pop-in { from { opacity: 0; transform: scale(0.92); } to { opacity: 1; transform: scale(1); } }
 
 .modal-scrim { background: color-mix(in srgb, #000 34%, transparent); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); animation: fade-in 0.2s ease-out; }

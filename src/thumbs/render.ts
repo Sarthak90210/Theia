@@ -89,6 +89,11 @@ export async function renderThumbnails(
   return { width: meta.autoOrient?.width ?? meta.width ?? 0, height: meta.autoOrient?.height ?? meta.height ?? 0 }
 }
 
+/** Any photo or video as a sharp image the right way up: what thumbnails, and the closer look, start from. */
+export async function openSource(file: string, mime: string, deps: RenderDeps): Promise<Sharp> {
+  return source(file, mime, deps)
+}
+
 async function source(file: string, mime: string, deps: RenderDeps): Promise<Sharp> {
   if (mime === 'image/heic' || mime === 'image/heif') {
     const img = await deps.heic.decode(file)

@@ -11,6 +11,8 @@ interface Props {
   /** The vault was removed from Theia or deleted. */
   onGone: (message: string) => void
   onError: (message: string) => void
+  onAddFolder?: (id: SourceId) => void
+  onAddFiles?: (id: SourceId) => void
 }
 
 /**
@@ -19,7 +21,7 @@ interface Props {
  * and goes to the Recycle Bin unless the folder is too big for it, in which
  * case Windows would delete it for good, so that is asked for separately.
  */
-export function VaultDialog({ id, onClose, onGone, onError }: Props) {
+export function VaultDialog({ id, onClose, onGone, onError, onAddFolder, onAddFiles }: Props) {
   const [d, setD] = useState<VaultDetails | null>(null)
   const [step, setStep] = useState<'info' | 'delete'>('info')
   const [typed, setTyped] = useState('')
@@ -117,6 +119,30 @@ export function VaultDialog({ id, onClose, onGone, onError }: Props) {
               <button className="ghost" onClick={() => void window.photos.revealVault(id)} disabled={busy}>
                 <I.Folder size={16} /> Show in File Explorer
               </button>
+              {onAddFolder && (
+                <button
+                  className="ghost"
+                  onClick={() => {
+                    onClose()
+                    onAddFolder(id)
+                  }}
+                  disabled={busy}
+                >
+                  <I.Folder size={16} /> Add from folder…
+                </button>
+              )}
+              {onAddFiles && (
+                <button
+                  className="ghost"
+                  onClick={() => {
+                    onClose()
+                    onAddFiles(id)
+                  }}
+                  disabled={busy}
+                >
+                  <I.Plus size={16} /> Add files…
+                </button>
+              )}
               <button
                 className="ghost"
                 onClick={() => {
