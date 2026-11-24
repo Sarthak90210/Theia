@@ -23,6 +23,10 @@ import { Welcome } from './Setup.tsx'
 import { applyTheme } from './theme.ts'
 import { Glass, GlassMode, useGlassMode } from './glass/Glass.tsx'
 import { WelcomeHero } from './WelcomeHero.tsx'
+import { useThrottled } from './throttle.ts'
+import { reuseItems } from './reuse.ts'
+import { installDialogFocus } from './dialog-focus.ts'
+import { MoveToFolderMenu } from './HiddenFolders.tsx'
 
 const VIEWS: { id: View; name: string }[] = [
   { id: 'years', name: 'Years' },
@@ -90,7 +94,22 @@ export function App() {
   const shortcutTargets = useRef<{ keys: string[]; start: string | null }>({ keys: [], start: null })
   const [vaultDialog, setVaultDialog] = useState<SourceId | null>(null)
   /** fromAction: opened because Hide, Delete or Recover needed it, so say to try again. */
-  const [protect, setProtect] = useState<{ kind: 'setup' | 'unlock'; vault: SourceId; fromAction?: boolean } | null>(null)
+  const [protect, setProtect] = useState<{ kind: 'setup' | 'unlock'; vault: SourceId; fromAction?: boolean; fromSave?: boolean } | null>(null)
+  // Say when a vault's drive is unplugged or plugged back in (gallery-service checkDrives).
+  const offlineRoots = useRef<Set<string> | null>(null)
+  const offlineKey = state ? state.offlineVaults.map((o) => o.root).join('\n') : null
+  useEffect(() => {
+    if (!state) return
+    const now = new Set(state.offlineVaults.map((o) => o.root))
+    const before = offlineRoots.current
+    offlineRoots.current = now
+    if (!before) return // what was already so at startup isn't news
+    const gone = state.offlineVaults.find((o) => !before.has(o.root))
+    const back = state.vaults.find((v) => before.has(v.root) && !now.has(v.root))
+    if (gone) setNotice(`The drive with “${gone.name}” was disconnected. It opens again by itself when you plug the drive back in.`)
+    else if (back) setNotice(`“${back.name}” is connected again.`)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [offlineKey])
   // Messages go away by themselves; errors stay a little longer to be read.
   useEffect(() => {
     if (!notice) return
@@ -103,13 +122,20 @@ export function App() {
   /** Height of the glass toolbar floating over the photos, so the grid starts below it and scrolls under it. */
   const chrome = useRef<HTMLDivElement | null>(null)
   const [chromeH, setChromeH] = useState(0)
+  // The toolbar mounts again after every viewer, editor and People visit: its
+  // observer is let go each time rather than one more left behind.
+  const chromeObserver = useRef<ResizeObserver | null>(null)
   const chromeRef = useCallback((el: HTMLDivElement | null) => {
     chrome.current = el
+    chromeObserver.current?.disconnect()
+    chromeObserver.current = null
     if (!el) return setChromeH(0)
     const ro = new ResizeObserver(() => setChromeH(Math.ceil(el.getBoundingClientRect().height)))
     ro.observe(el)
+    chromeObserver.current = ro
     setChromeH(Math.ceil(el.getBoundingClientRect().height))
   }, [])
+  useEffect(() => installDialogFocus(), [])
 
   // The chosen theme, as soon as the settings are known and whenever they change.
   const themeKey = state ? JSON.stringify([state.settings.theme, state.settings.customTheme, state.settings.liquidGlass]) : null
@@ -129,12 +155,21 @@ export function App() {
   const ready = !!vault || device?.state === 'ready'
   // Reload when the source's contents change, such as after a save into it.
   const sourceRevision = vault?.revision ?? 0
-  const sourceCount = vault?.count ?? device?.count ?? null
+  // The count climbs with every item a save adds. Reloading the whole list on
+  // each step (11,000 items, 2 MB, ~50 ms of the main process each time, several
+  // times a second) is what made big saves into an open vault hang. Growth
+  // shows every few seconds; a real change (revision) still reloads at once.
+  const sourceCount = useThrottled(vault?.count ?? device?.count ?? null, 3000)
   useEffect(() => {
-    if ((collection === 'hidden' || collection === 'deleted') && vault?.protection !== 'unlocked') {
+    if ((collection === 'hidden' || collection.startsWith('hidden:') || collection === 'deleted') && vault?.protection !== 'unlocked') {
       setViewerKey(null); setFocusKey(null); setSelected(new Set()); setInfoOpen(false)
+      if (collection.startsWith('hidden:')) setCollection('hidden')
     }
   }, [collection, vault?.protection])
+  // A folder in Hidden deleted (here or elsewhere) while it was open: back to Hidden.
+  useEffect(() => {
+    if (collection.startsWith('hidden:') && collections?.hiddenFolders && !collections.hiddenFolders.some((f) => f.id === collection)) setCollection('hidden')
+  }, [collection, collections])
 
   // Pick a source on start, and another one when the selected phone is unplugged.
   useEffect(() => {
@@ -173,7 +208,7 @@ export function App() {
     window.photos
       .collections(source)
       .then((c) => live && setCollections(c))
-      .catch((e: Error) => live && setLoadError(e.message))
+      .catch((e: Error) => live && setLoadError(cleanError(e.message)))
     return () => {
       live = false
     }
@@ -187,7 +222,7 @@ export function App() {
       .items(source, collection)
       .then((list) => {
         if (!live) return
-        setItems(list)
+        setItems((prev) => reuseItems(prev, list))
         setViewerKey(key => key && list.some(it => it.key === key) ? key : null)
         // Drop selected items that are gone.
         setSelected((s) => {
@@ -196,7 +231,7 @@ export function App() {
           return new Set([...s].filter((k) => keys.has(k)))
         })
       })
-      .catch((e: Error) => live && setLoadError(e.message))
+      .catch((e: Error) => live && setLoadError(cleanError(e.message)))
     return () => {
       live = false
     }
@@ -319,7 +354,7 @@ export function App() {
       } else if (ctrl && k === 'r') {
         e.preventDefault()
         if (editor || !source) return
-        if (device) void window.photos.retryDevice(source).then(() => setRefresh(n => n + 1)).catch((e: Error) => setNotice(e.message))
+        if (device) void window.photos.retryDevice(source).then(() => setRefresh(n => n + 1)).catch((e: Error) => setNotice(cleanError(e.message)))
         else setRefresh(n => n + 1)
       }
     }
@@ -352,7 +387,7 @@ export function App() {
 
   if (!state) return <div className="boot"><span className="spinner" /><span>Opening Theia</span></div>
 
-  const current = [...(collections?.smart ?? []), ...(collections?.albums ?? [])].find((c) => c.id === collection)
+  const current = [...(collections?.smart ?? []), ...(collections?.albums ?? []), ...(collections?.hiddenFolders ?? [])].find((c) => c.id === collection)
   const timeViews = collection === 'library'
   const saveKeys = selected.size ? [...selected] : keysAll
   const saveLabel = selected.size ? `Save ${count(selected.size)} to…` : `Save all to…`
@@ -361,11 +396,15 @@ export function App() {
   const allSelected = list.length > 0 && selected.size === list.length
   // An action that needs a passcode first opens the right dialog instead of an error.
   const showError = (m: string) => {
+    // Saving hidden or deleted items into another vault names that vault.
+    const into = /PROTECTION_NEEDED\[([^\]]+)\]/.exec(m)?.[1]
+    if (into && state.vaults.some((v) => v.id === into)) return setProtect({ kind: 'setup', vault: into, fromAction: true, fromSave: true })
     if (vault && m.includes('PROTECTION_NEEDED')) return setProtect({ kind: 'setup', vault: vault.id, fromAction: true })
     if (vault && m.includes('LOCKED:')) return setProtect({ kind: 'unlock', vault: vault.id, fromAction: true })
     setNotice(cleanError(m))
   }
-  const privateCollection = collection === 'hidden' || collection === 'deleted'
+  const inHidden = collection === 'hidden' || collection.startsWith('hidden:')
+  const privateCollection = inHidden || collection === 'deleted'
   // Shortcuts act on the open photo, else the selection, else the focused photo.
   const viewerItem = viewer !== null ? list[viewer] ?? null : null
   shortcutTargets.current = {
@@ -410,7 +449,7 @@ export function App() {
       <LockedCollection
         vault={vault.id}
         vaultName={vault.name}
-        what={collection as 'hidden' | 'deleted'}
+        what={inHidden ? 'hidden' : 'deleted'}
         protection={vault.protection}
         count={items?.length ?? null}
         onSetUp={() => setProtect({ kind: 'setup', vault: vault.id })}
@@ -449,9 +488,9 @@ export function App() {
     </div>
   } else if (!items.length) {
     body = <div className="empty">
-      <div className="empty-symbol">{collection === 'hidden' ? <I.Hidden size={30} /> : collection === 'deleted' ? <I.Trash size={30} /> : <I.Album size={30} />}</div>
-      <h2>{collection === 'hidden' ? 'No hidden items' : collection === 'deleted' ? 'Recently Deleted is empty' : 'Nothing here yet'}</h2>
-      <p className="muted">{collection === 'hidden' ? 'Photos and videos you hide will appear here.' : collection === 'deleted' ? 'Deleted photos and videos will appear here, ready to recover.' : 'Photos and videos saved to this collection will appear here.'}</p>
+      <div className="empty-symbol">{collection.startsWith('hidden:') ? <I.Folder size={30} /> : collection === 'hidden' ? <I.Hidden size={30} /> : collection === 'deleted' ? <I.Trash size={30} /> : collection === 'library' ? <I.Grid size={30} /> : <I.Album size={30} />}</div>
+      <h2>{collection.startsWith('hidden:') ? 'This folder is empty' : collection === 'hidden' ? 'No hidden items' : collection === 'deleted' ? 'Recently Deleted is empty' : 'Nothing here yet'}</h2>
+      <p className="muted">{collection.startsWith('hidden:') ? 'In Hidden, select photos and videos and choose Move to folder to put them here.' : collection === 'hidden' ? 'Photos and videos you hide will appear here.' : collection === 'deleted' ? 'Deleted photos and videos will appear here, ready to recover.' : 'Photos and videos saved to this collection will appear here.'}</p>
       {vault && collection === 'library' && (
         <div className="dialog-buttons" style={{ marginTop: 20 }}>
           <button className="primary" onClick={() => void addFolder(vault.id)}>
@@ -487,6 +526,7 @@ export function App() {
         insetBottom={88}
         onContextMenu={(i, e) => openMenu(i, e, false)}
         timeline={inTimeOrder}
+        startAt={searchQuery !== null ? 'top' : 'end'}
       />
     )
   }
@@ -534,6 +574,7 @@ export function App() {
         onOpenVault={() => void openVault()}
         onAddFolderToVault={() => void addFolder(vault?.id)}
         onVaultOptions={setVaultDialog}
+        onError={showError}
         onSettings={() => setPreferences('settings')}
         onShortcuts={() => setPreferences('shortcuts')}
       />}
@@ -588,7 +629,7 @@ export function App() {
                   {vault && <VaultActions source={source} keys={[items[viewer]!.key]} collection={collection}
                     onEdit={() => setEditor(items[viewer]!)}
                     onChanged={() => { setViewer(null); setRefresh(n => n + 1); clearSelection() }} onError={showError} />}
-                  <SaveMenu state={state} source={source} keys={[items[viewer]!.key]} label="Save to..." onError={showError} />
+                  <SaveMenu state={state} source={source} keys={[items[viewer]!.key]} label="Save to…" onError={showError} />
                 </>
               }
             />
@@ -711,8 +752,8 @@ export function App() {
           {collection === 'deleted' && <div className="collection-note">
             {vault ? 'Deleted items are encrypted and stay here until you recover them or delete them permanently.' : "Recently Deleted on your iPhone. You can view and save these here; recover or delete them on the iPhone. Theia never keeps copies of them in its cache."}
           </div>}
-          {collection === 'hidden' && <div className="collection-note">
-            {vault ? 'Hidden items are encrypted in the vault folder and left out of the library and albums. Theia asks for the passcode to show them.' : "Hidden on your iPhone. Change what's hidden on the iPhone. Some originals may not be readable over USB. Theia never keeps copies of them in its cache."}
+          {inHidden && <div className="collection-note">
+            {vault ? 'Hidden items are encrypted in the vault folder and left out of the library and albums. Theia asks for the passcode to show them.' : "Hidden on your iPhone. Change what's hidden on the iPhone. Saved into a vault, they stay hidden and encrypted there. Some originals may not be readable over USB. Theia never keeps copies of them in its cache."}
           </div>}
           </div>
         )}
@@ -729,6 +770,9 @@ export function App() {
             {vault && <VaultActions key={source! + collection} source={source!} keys={[...selected]} collection={collection}
               onEdit={() => setEditor(list.find(i => i.key === [...selected][0]) ?? null)}
               onChanged={() => { setViewer(null); setRefresh(n => n + 1); stopSelecting() }} onError={showError} />}
+            {vault && inHidden && vault.protection === 'unlocked' && <MoveToFolderMenu source={source!} keys={[...selected]}
+              folders={collections?.hiddenFolders ?? []} collection={collection} disabled={false}
+              onMoved={(m) => { setNotice(m); setRefresh(n => n + 1); stopSelecting() }} onError={showError} />}
             <SaveMenu state={state} source={source!} keys={[...selected]} label={`Save ${count(selected.size)} to…`} primary onError={showError} />
           </>}
         </Glass></div>}
@@ -744,7 +788,9 @@ export function App() {
             onCancel={() => setProtect(null)}
             onDone={() => {
               setNotice(
-                protect.fromAction
+                protect.fromSave
+                  ? 'Hidden and Recently Deleted are now encrypted. Save again: hidden and deleted items will stay private there.'
+                  : protect.fromAction
                   ? 'Hidden and Recently Deleted are now encrypted. Hide or delete again to finish.'
                   : 'Hidden and Recently Deleted are now encrypted.',
               )
@@ -828,7 +874,7 @@ export function App() {
           />
         )}
         {notice && (
-          <div className="toast" role="alert">
+          <div className={`toast ${selecting && viewer === null ? 'above-bar' : ''}`} role="alert">
             <span>{notice}</span>
             <button className="ghost icon" onClick={() => setNotice(null)} aria-label="Dismiss">
               <I.Close size={14} />

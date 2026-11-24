@@ -531,6 +531,10 @@ button.primary.danger {
   border-color: var(--bad);
   color: #1b0d0c;
 }
+/* Light themes' red is dark: white text reads on it (dark text was 2.7:1). */
+:root[data-theme='light'] button.primary.danger {
+  color: #fff;
+}
 
 @media (max-width: 980px) {
   .ed-body {

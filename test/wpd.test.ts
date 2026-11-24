@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { normalizePhoneIdentity, validatePhoneObject, wpdDeleteVerified, wpdHashObject, wpdInventory, type PhoneObject } from '../src/device/wpd.ts'
+import { POWERSHELL } from '../src/shell/powershell.ts'
 
 vi.mock('node:child_process', () => ({ execFile: vi.fn() }))
 const udid = '00008140-0011223344556677'
@@ -57,7 +58,9 @@ describe.skipIf(process.platform !== 'win32')('Windows delete wrapper', () => {
     expect(result.deleted.size).toBe(0)
     expect(result.failed.get(object.objectId)).toContain('did not confirm')
     const args = vi.mocked(execFile).mock.calls[0]!
-    expect(args[0]).toBe('powershell.exe')
+    // By full path, so a trimmed PATH can't break iPhone cleanup (src/shell/powershell.ts).
+    expect(args[0]).toBe(POWERSHELL)
+    expect(String(args[0])).toMatch(/powershell\.exe$/i)
     expect(args[1]).toContain('-NonInteractive')
   })
 

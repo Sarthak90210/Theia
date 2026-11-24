@@ -40,6 +40,36 @@ describe('video structure', () => {
     v.writeUInt32BE(0x7fffffff, 16)
     expect(checkStructureBuffer(v).ok).toBe(false)
   })
+
+  // WhatsApp leaves a few KB after some videos. Two real videos that decode to
+  // the end were refused as truncated for this.
+  const box = (type: string, body: Buffer) => {
+    const head = Buffer.alloc(8)
+    head.writeUInt32BE(8 + body.length, 0)
+    head.write(type, 4, 'latin1')
+    return Buffer.concat([head, body])
+  }
+  const whole = () => Buffer.concat([box('ftyp', Buffer.from('mp42\0\0\0\0', 'latin1')), box('moov', Buffer.alloc(40)), box('mdat', Buffer.alloc(400, 7))])
+
+  it("accepts an app's bytes after a complete video", () => {
+    const junk = Buffer.alloc(3365, 0)
+    junk.writeUInt32BE(22544384, 0)
+    junk.write('\x01`\0\0', 4, 'latin1')
+    const r = checkStructureBuffer(Buffer.concat([whole(), junk]))
+    expect(r).toMatchObject({ ok: true, format: 'mp4/mp42' })
+    expect(r.detail).toMatch(/3365 bytes after the end of the video/)
+    expect(checkStructureBuffer(Buffer.concat([whole(), Buffer.from([0, 1, 2])]))).toMatchObject({ ok: true })
+  })
+
+  it('still rejects a real box cut off after the video', () => {
+    const cut = box('udta', Buffer.alloc(500)).subarray(0, 100)
+    expect(checkStructureBuffer(Buffer.concat([whole(), cut])).ok).toBe(false)
+  })
+
+  it('still rejects junk when the video has no index', () => {
+    const noIndex = Buffer.concat([box('ftyp', Buffer.from('mp42\0\0\0\0', 'latin1')), box('mdat', Buffer.alloc(400, 7)), Buffer.alloc(100, 0xee)])
+    expect(checkStructureBuffer(noIndex).ok).toBe(false)
+  })
 })
 
 describe('still structure', () => {

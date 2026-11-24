@@ -36,18 +36,66 @@ function where(s: (typeof SMART)[number]): string {
   return s.live === false ? s.where : `${s.where} AND ${LIVE}`
 }
 
+/**
+ * Every smart collection's count and cover from one pass over the table.
+ *
+ * Each collection used to be its own COUNT(*) plus a newest-item subquery: a
+ * dozen full scans, 23 ms at 11,000 items and 127 ms at 50,000, on Electron's
+ * main thread, again every few seconds while a save was adding to the vault.
+ * Instead the table is grouped by everything the collections test, and each
+ * collection adds up the few groups it matches. SQLite returns, with a lone
+ * MAX(), the id from the row holding the maximum, which is the cover.
+ */
+interface SmartGroup {
+  n: number
+  newest: number | null
+  cover: number
+  kind: string
+  subtype: string | null
+  favourite: number
+  has_adjustments: number
+  hidden: number
+  deleted: number
+  recent: number
+}
+
+const SMART_TEST: Record<string, (g: SmartGroup) => boolean> = {
+  library: () => true,
+  favourites: (g) => g.favourite === 1,
+  videos: (g) => g.kind === 'video',
+  live: (g) => g.kind === 'live',
+  screenshots: (g) => g.subtype === 'screenshot',
+  selfies: (g) => g.subtype === 'selfie',
+  panoramas: (g) => g.subtype === 'panorama',
+  bursts: (g) => g.kind === 'burst',
+  edited: (g) => g.has_adjustments === 1,
+  recent: (g) => g.recent === 1,
+  hidden: (g) => g.hidden === 1 && g.deleted === 0,
+  deleted: (g) => g.deleted === 1,
+}
+
 export function vaultCollections(db: Db): Collections {
+  const groups = db
+    .prepare(
+      `SELECT COUNT(*) AS n, MAX(captured_utc) AS newest, id AS cover, kind, subtype, favourite, has_adjustments, hidden,
+              deleted_at IS NOT NULL AS deleted,
+              created_at > (CAST(strftime('%s','now') AS INTEGER) * 1000 - ${RECENT_MS}) AS recent
+         FROM asset GROUP BY kind, subtype, favourite, has_adjustments, hidden, deleted, recent`,
+    )
+    .all() as SmartGroup[]
   const smart: CollectionInfo[] = []
   for (const s of SMART) {
-    const row = db
-      .prepare(
-        `SELECT COUNT(*) AS n, (SELECT a2.id FROM asset a2 WHERE ${where(s).replaceAll('a.', 'a2.')}
-                                ORDER BY a2.captured_utc DESC LIMIT 1) AS cover
-           FROM asset a WHERE ${where(s)}`,
-      )
-      .get() as { n: number; cover: number | null }
-    if (row.n > 0 || s.always || s.utility) {
-      smart.push({ id: s.id, name: s.name, kind: s.utility ? 'utility' : 'smart', count: row.n, cover: row.cover === null ? null : String(row.cover) })
+    const test = SMART_TEST[s.id]!
+    let n = 0
+    let best: SmartGroup | null = null
+    for (const g of groups) {
+      if (!test(g) || (s.live !== false && (g.deleted === 1 || g.hidden === 1))) continue
+      n += g.n
+      // The newest by capture time; one with no capture time only if none has one.
+      if (!best || (g.newest !== null && (best.newest === null || g.newest > best.newest))) best = g
+    }
+    if (n > 0 || s.always || s.utility) {
+      smart.push({ id: s.id, name: s.name, kind: s.utility ? 'utility' : 'smart', count: n, cover: best ? String(best.cover) : null })
     }
   }
 
@@ -95,7 +143,15 @@ const ITEM_COLUMNS = `a.id, a.kind, a.captured_utc, a.captured_offset, a.width, 
 export function vaultItems(db: Db, collectionId: string): GalleryItem[] {
   let rows: ItemRow[]
   const album = /^album:(\d+)$/.exec(collectionId)
-  if (album) {
+  const folder = /^hidden:(\d+)$/.exec(collectionId)
+  if (folder) {
+    rows = db
+      .prepare(
+        `SELECT ${ITEM_COLUMNS} FROM asset a WHERE a.hidden = 1 AND a.deleted_at IS NULL AND a.hidden_folder_id = ?
+          ORDER BY COALESCE(a.captured_utc, a.created_at), a.id`,
+      )
+      .all(Number(folder[1])) as ItemRow[]
+  } else if (album) {
     rows = db
       .prepare(
         `SELECT ${ITEM_COLUMNS} FROM album_asset x JOIN asset a ON a.id = x.asset_id
@@ -117,6 +173,21 @@ export function vaultItems(db: Db, collectionId: string): GalleryItem[] {
   const counts = burstFrameCounts(db, bursts)
   for (const i of items) if (i.kind === 'burst') i.frames = counts.get(Number(i.key))
   return items
+}
+
+/** The folders inside Hidden, in order, with how many items each holds and its newest as cover. */
+export function hiddenFolders(db: Db): CollectionInfo[] {
+  return (
+    db
+      .prepare(
+        `SELECT f.id, f.name,
+                (SELECT COUNT(*) FROM asset a WHERE a.hidden_folder_id = f.id AND a.hidden = 1 AND a.deleted_at IS NULL) AS n,
+                (SELECT a.id FROM asset a WHERE a.hidden_folder_id = f.id AND a.hidden = 1 AND a.deleted_at IS NULL
+                  ORDER BY a.captured_utc DESC LIMIT 1) AS cover
+           FROM hidden_folder f ORDER BY f.position, f.id`,
+      )
+      .all() as { id: number; name: string; n: number; cover: number | null }[]
+  ).map((f) => ({ id: `hidden:${f.id}`, name: f.name, kind: 'utility', count: f.n, cover: f.cover === null ? null : String(f.cover) }))
 }
 
 /** Visible items by id, in the order given (a search's ranking). */

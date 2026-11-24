@@ -2,7 +2,7 @@ import path from 'node:path'
 import fs from 'node:fs'
 import type { Db } from '../library/db.ts'
 import { drain, PermanentJobError, type Job, type JobQueue, type RunOptions } from '../jobs/queue.ts'
-import { hasThumbs, renderThumbnails, thumbPath, SIZES, type ThumbSize, type RenderDeps } from './render.ts'
+import { hasThumbs, hasThumbsAsync, renderThumbnails, thumbPath, SIZES, type ThumbSize, type RenderDeps } from './render.ts'
 
 export const THUMBNAIL = 'thumbnail'
 
@@ -20,22 +20,54 @@ interface PrimaryFile {
  */
 export function queueThumbnails(db: Db, queue: JobQueue, cacheRoot: string): { added: number; requeued: number } {
   const added = queue.enqueueAll(THUMBNAIL)
-  const done = db
-    .prepare(
-      `SELECT j.asset_id, f.sha256
-         FROM job j JOIN file f ON f.asset_id = j.asset_id AND f.is_primary = 1 JOIN asset a ON a.id = j.asset_id
-        WHERE j.kind = ? AND j.state = 'done' AND f.encrypted_path IS NULL AND a.hidden = 0 AND a.deleted_at IS NULL`,
-    )
-    .all(THUMBNAIL) as { asset_id: number; sha256: string }[]
-
   let requeued = 0
-  for (const row of done) {
+  for (const row of doneThumbnails(db)) {
     if (!hasThumbs(cacheRoot, row.sha256)) {
       queue.enqueue(THUMBNAIL, row.asset_id)
       requeued++
     }
   }
   return { added, requeued }
+}
+
+function doneThumbnails(db: Db): { asset_id: number; sha256: string }[] {
+  return db
+    .prepare(
+      `SELECT j.asset_id, f.sha256
+         FROM job j JOIN file f ON f.asset_id = j.asset_id AND f.is_primary = 1 JOIN asset a ON a.id = j.asset_id
+        WHERE j.kind = ? AND j.state = 'done' AND f.encrypted_path IS NULL AND a.hidden = 0 AND a.deleted_at IS NULL`,
+    )
+    .all(THUMBNAIL) as { asset_id: number; sha256: string }[]
+}
+
+/**
+ * The second half of queueThumbnails for the app: requeue thumbnails whose
+ * files have gone from the cache. Three file checks per item: 0.55 s for
+ * 11,000 items on a USB drive, all on the main thread when done in one go. So
+ * it pauses every `batch` items to let the window be answered, and the app
+ * runs it once per vault per session, since the cache doesn't vanish while
+ * it's open. New items need only `queue.enqueueAll`, which is one query.
+ */
+export async function requeueMissingThumbnails(db: Db, queue: JobQueue, cacheRoot: string, opts: { batch?: number; signal?: AbortSignal } = {}): Promise<number> {
+  // Asynchronous, so the main thread stays free, but only a few checks at a
+  // time (`batch`, default 8). Node runs file checks on a small shared thread
+  // pool; hundreds in flight queued every thumbnail the window asked for
+  // behind them. Measured on a USB hard drive: with 750 in flight, a visible
+  // thumbnail took 57 ms to read; with 32 or fewer, 1 to 3 ms.
+  const inFlight = Math.max(1, opts.batch ?? 8)
+  let requeued = 0
+  const rows = doneThumbnails(db)
+  let next = 0
+  await Promise.all(Array.from({ length: inFlight }, async () => {
+    while (next < rows.length && !opts.signal?.aborted) {
+      const row = rows[next++]!
+      if (!(await hasThumbsAsync(cacheRoot, row.sha256))) {
+        queue.enqueue(THUMBNAIL, row.asset_id)
+        requeued++
+      }
+    }
+  }))
+  return requeued
 }
 
 export function thumbnailHandler(db: Db, mediaRoot: string, cacheRoot: string, deps: RenderDeps) {
@@ -60,10 +92,13 @@ export function thumbnailHandler(db: Db, mediaRoot: string, cacheRoot: string, d
     const privacy = file as PrimaryFile & { encrypted_path?: string | null; hidden: number; deleted_at: number | null }
     if (privacy.encrypted_path || privacy.hidden || privacy.deleted_at !== null) return
     // Content-addressed: identical bytes already rendered for another asset.
-    if (hasThumbs(cacheRoot, file.sha256) && file.width !== null) return
+    if (file.width !== null && (await hasThumbsAsync(cacheRoot, file.sha256))) return
 
     const abs = path.join(mediaRoot, ...file.path.split('/'))
-    const size = await renderThumbnails(abs, file.mime, file.sha256, cacheRoot, deps)
+    // In the app, in a separate process (render-host.ts); in tests and tools, right here.
+    const size = deps.render
+      ? await deps.render({ file: abs, mime: file.mime, sha256: file.sha256, cacheRoot })
+      : await renderThumbnails(abs, file.mime, file.sha256, cacheRoot, deps)
     const now = primary.get(job.assetId) as typeof privacy | undefined
     if (!now || now.encrypted_path || now.hidden || now.deleted_at !== null) {
       const visible = db.prepare(`SELECT 1 FROM file f JOIN asset a ON a.id=f.asset_id WHERE f.sha256=? AND a.hidden=0 AND a.deleted_at IS NULL AND f.encrypted_path IS NULL LIMIT 1`).get(file.sha256)

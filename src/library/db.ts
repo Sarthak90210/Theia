@@ -20,6 +20,12 @@ export function openLibrary(dbPath: string): Db {
   db.pragma('journal_mode = WAL')
   db.pragma('synchronous = NORMAL')
   db.pragma('foreign_keys = ON')
+  // Vaults live on USB hard drives. SQLite's default page cache is 2 MB,
+  // smaller than a 50,000-item vault's tables, so queries the window waits on
+  // went back to the disk; and sorts with no index (the library's order)
+  // could spill temporary files to it. Both stay in memory now.
+  db.pragma('cache_size = -32000')
+  db.pragma('temp_store = MEMORY')
   migrate(db)
   return db
 }

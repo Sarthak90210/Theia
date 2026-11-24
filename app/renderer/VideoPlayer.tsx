@@ -286,17 +286,17 @@ export const VideoPlayer = forwardRef<PlayerHandle, Props>(function VideoPlayer(
             }}
           />
           <div className="player-row">
-            <button className="pbtn" onClick={toggle} title={playing ? 'Pause (K)' : 'Play (K)'}>
+            <button className="pbtn" onClick={toggle} title={playing ? 'Pause (K)' : 'Play (K)'} aria-label={playing ? 'Pause' : 'Play'}>
               {playing ? <I.Pause /> : <I.Play />}
             </button>
-            <button className="pbtn" onClick={() => jump(-10)} title="Back 10 seconds (J)">
+            <button className="pbtn" onClick={() => jump(-10)} title="Back 10 seconds (J)" aria-label="Back 10 seconds">
               <I.Back10 />
             </button>
-            <button className="pbtn" onClick={() => jump(10)} title="Forward 10 seconds (L)">
+            <button className="pbtn" onClick={() => jump(10)} title="Forward 10 seconds (L)" aria-label="Forward 10 seconds">
               <I.Forward10 />
             </button>
             <div className="pvol">
-              <button className="pbtn" onClick={() => setMuted((m) => !m)} title={muted ? 'Unmute (M)' : 'Mute (M)'}>
+              <button className="pbtn" onClick={() => setMuted((m) => !m)} title={muted ? 'Unmute (M)' : 'Mute (M)'} aria-label={muted ? 'Unmute' : 'Mute'} aria-pressed={muted}>
                 {muted || volume === 0 ? <I.Muted /> : <I.Volume level={volume} />}
               </button>
               <input
@@ -318,7 +318,7 @@ export const VideoPlayer = forwardRef<PlayerHandle, Props>(function VideoPlayer(
             </button>
             <span className="pspace" />
             <div className="menu-anchor">
-              <button className={`pbtn ptext ${speed !== 1 ? 'on' : ''}`} onClick={() => setMenu((m) => !m)} title="Speed (< >)">
+              <button className={`pbtn ptext ${speed !== 1 ? 'on' : ''}`} onClick={() => setMenu((m) => !m)} title="Speed (< >)" aria-label={`Speed, ${speed} times`} aria-haspopup="menu">
                 {speed}×
               </button>
               {menu && (
@@ -342,11 +342,11 @@ export const VideoPlayer = forwardRef<PlayerHandle, Props>(function VideoPlayer(
                 </div>
               )}
             </div>
-            <button className={`pbtn ${loop ? 'on' : ''}`} onClick={() => setLoop((l) => !l)} title="Loop">
+            <button className={`pbtn ${loop ? 'on' : ''}`} onClick={() => setLoop((l) => !l)} title="Loop" aria-label="Loop" aria-pressed={loop}>
               <I.Loop />
             </button>
             {'pictureInPictureEnabled' in document && (
-              <button className="pbtn" onClick={pip} title="Picture in picture">
+              <button className="pbtn" onClick={pip} title="Picture in picture" aria-label="Picture in picture">
                 <I.PictureInPicture />
               </button>
             )}
@@ -399,7 +399,10 @@ function Scrubber({ time, duration, buffered, board, boardUrl, onSeek, onScrub }
       ref={bar}
       className={`scrub ${dragging ? 'dragging' : ''}`}
       role="slider"
+      // Reachable with Tab; the player's arrow keys then move it (5 s a press).
+      tabIndex={0}
       aria-label="Seek"
+      aria-valuetext={`${clock(time * 1000)} of ${clock(duration * 1000)}`}
       aria-valuemin={0}
       aria-valuemax={Math.round(duration)}
       aria-valuenow={Math.round(time)}

@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto'
 import fs from 'node:fs'
+import { sha256Of } from './hash.ts'
 import path from 'node:path'
 import type { OpenVault } from './vault.ts'
 import type { SaveItem } from './save.ts'
@@ -41,15 +41,8 @@ export interface SourceCleanup {
   reasons: { item: string; reason: string }[]
 }
 
-function hashFile(file: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const h = createHash('sha256')
-    fs.createReadStream(file, { highWaterMark: 4 * 1024 * 1024 })
-      .on('data', (d) => h.update(d))
-      .on('end', () => resolve(h.digest('hex')))
-      .on('error', reject)
-  })
-}
+/** Closed before it returns: the original is moved to the Recycle Bin straight after (see hash.ts). */
+const hashFile = (file: string) => sha256Of(file)
 
 function inside(child: string, parent: string): boolean {
   const rel = path.relative(parent, child)

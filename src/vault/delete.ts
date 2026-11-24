@@ -1,6 +1,6 @@
-import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import { sha256Of } from './hash.ts'
 import type { Db } from '../library/db.ts'
 
 /**
@@ -83,12 +83,17 @@ export async function purgeAssets(
       if (fs.existsSync(main)) targets.push(main)
       for (const folder of folders) {
         const copy = path.join(folder, path.basename(main))
-        if (copy !== main && fs.existsSync(copy) && sameFile(main, copy, f.sha256)) targets.push(copy)
+        if (copy !== main && fs.existsSync(copy) && (await sameFile(main, copy, f.sha256))) targets.push(copy)
       }
     }
 
     let ok = true
-    for (const t of new Set(targets)) {
+    // Links in album folders first, the vault's own copies last: if one can't
+    // be moved, the item stays complete (minus a link) instead of the vault
+    // listing a file already in the Recycle Bin.
+    const mains = new Set(files.map((f) => f.encrypted_path && privateFolder ? path.join(privateFolder, f.encrypted_path) : path.join(mediaRoot, ...f.path.split('/'))))
+    const ordered = [...new Set(targets)].sort((a, b) => Number(mains.has(a)) - Number(mains.has(b)))
+    for (const t of ordered) {
       try {
         await trash(t)
       } catch (e) {
@@ -111,7 +116,7 @@ export async function purgeAssets(
   return result
 }
 
-function sameFile(a: string, b: string, sha256: string): boolean {
+async function sameFile(a: string, b: string, sha256: string): Promise<boolean> {
   try {
     const sa = fs.statSync(a, { bigint: true })
     const sb = fs.statSync(b, { bigint: true })
@@ -123,7 +128,9 @@ function sameFile(a: string, b: string, sha256: string): boolean {
     if (!fs.existsSync(b)) return false
   }
   // No hard links on this drive (FAT, exFAT): saving made a copy. Same bytes?
-  return createHash('sha256').update(fs.readFileSync(b)).digest('hex') === sha256
+  // Streamed: reading a video whole needs its size in memory, and a 4 GB one
+  // can't even fit in a Buffer.
+  return (await sha256Of(b)) === sha256
 }
 
 function hasTable(db: Db, name: string): boolean {

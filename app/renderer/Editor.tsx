@@ -108,8 +108,11 @@ export function Editor({ source, item, onClose, onSaved }: Props) {
   const gesture = (active: boolean) => {
     if (!active) setHistory((h) => H.endDrag(h))
   }
-  const undo = useCallback(() => setHistory((h) => H.undo(h)), [])
-  const redo = useCallback(() => setHistory((h) => H.redo(h)), [])
+  // The aspect lock isn't part of the history: after undo or redo the crop
+  // may not have the chosen shape, and the next drag would snap it to it.
+  // Freeform keeps the crop exactly as undo restored it.
+  const undo = useCallback(() => { setHistory((h) => H.undo(h)); setAspectId('free') }, [])
+  const redo = useCallback(() => { setHistory((h) => H.redo(h)); setAspectId('free') }, [])
 
   /* ------------------------------------------------------------- crop */
 

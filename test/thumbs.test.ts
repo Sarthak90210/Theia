@@ -8,7 +8,7 @@ import { openLibrary, type Db } from '../src/library/db.ts'
 import { JobQueue } from '../src/jobs/queue.ts'
 import { HeicPool } from '../src/thumbs/heic-pool.ts'
 import { hasThumbs, thumbPath, renderThumbnails } from '../src/thumbs/render.ts'
-import { queueThumbnails, runThumbnails, THUMBNAIL } from '../src/thumbs/jobs.ts'
+import { queueThumbnails, requeueMissingThumbnails, runThumbnails, THUMBNAIL } from '../src/thumbs/jobs.ts'
 import { scratch, type Scratch } from './helpers.ts'
 
 /**
@@ -157,6 +157,29 @@ describe('thumbnails', () => {
     expect(queueThumbnails(db, q, cache)).toEqual({ added: 0, requeued: 1 })
     await runThumbnails(db, q, media, cache, { heic }, { concurrency: 1 })
     expect(hasThumbs(cache, sha)).toBe(true)
+  })
+
+  it('finds deleted cache files in batches, the way the app checks', async () => {
+    const shas: string[] = []
+    for (let i = 0; i < 5; i++) shas.push(addAsset(`2026/${i}.jpg`, await jpeg(200 + i, 100), 'image/jpeg').sha)
+    const q = await run()
+    fs.rmSync(thumbPath(cache, shas[1]!, 'sm'))
+    fs.rmSync(thumbPath(cache, shas[3]!, 'ph'))
+    // A batch of 2 pauses twice on the way through five items; the result is the same.
+    expect(await requeueMissingThumbnails(db, q, cache, { batch: 2 })).toBe(2)
+    expect(q.counts(THUMBNAIL)).toMatchObject({ queued: 2, done: 3 })
+    await runThumbnails(db, q, media, cache, { heic }, { concurrency: 1 })
+    for (const sha of shas) expect(hasThumbs(cache, sha)).toBe(true)
+  })
+
+  it('renders through a stand-in for the thumbnail process when given one', async () => {
+    const { assetId } = addAsset('2026/a.jpg', await jpeg(300, 200), 'image/jpeg')
+    const q = new JobQueue(db)
+    q.enqueueAll(THUMBNAIL)
+    const asked: string[] = []
+    await runThumbnails(db, q, media, cache, { heic, render: async (r) => { asked.push(path.basename(r.file)); return { width: 300, height: 200 } } }, { concurrency: 1 })
+    expect(asked).toEqual(['a.jpg'])
+    expect(db.prepare('SELECT width, height FROM asset WHERE id = ?').get(assetId)).toEqual({ width: 300, height: 200 })
   })
 
   it.each(['hidden', 'deleted'] as const)('does not recreate disk thumbnails or endlessly requeue a %s item', async privacy => {

@@ -187,4 +187,25 @@ describe('drain', () => {
     await drain(q, 'cancel', async () => { await work(); abort.abort() }, { concurrency: 1, rest: () => 100, signal: abort.signal })
     expect(Date.now() - t).toBeLessThan(1000)
   })
+
+  it('starts no new job while the person is busy in the window, then carries on', async () => {
+    const q = new JobQueue(db)
+    for (let i = 0; i < 3; i++) q.enqueue('yield', asset(4000 + i))
+    const t = Date.now()
+    const busyUntil = t + 150
+    const started: number[] = []
+    await drain(q, 'yield', async () => { started.push(Date.now() - t) }, { concurrency: 2, yieldTo: () => Math.max(0, busyUntil - Date.now()) })
+    expect(started).toHaveLength(3)
+    expect(Math.min(...started)).toBeGreaterThanOrEqual(140)
+    expect(q.counts('yield')).toMatchObject({ done: 3, queued: 0 })
+
+    // Cancelling while held stops at once, with the jobs still queued.
+    for (let i = 0; i < 2; i++) q.enqueue('held', asset(5000 + i))
+    const abort = new AbortController()
+    setTimeout(() => abort.abort(), 50)
+    const s = Date.now()
+    await drain(q, 'held', async () => {}, { concurrency: 1, yieldTo: () => 10_000, signal: abort.signal })
+    expect(Date.now() - s).toBeLessThan(1000)
+    expect(q.counts('held')).toMatchObject({ queued: 2 })
+  })
 })

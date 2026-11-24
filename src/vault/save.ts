@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
+import { sha256Of } from './hash.ts'
 import type { Db } from '../library/db.ts'
 import type { MetadataReader } from '../metadata/reader.ts'
 import { packTags } from '../metadata/reader.ts'
@@ -58,6 +59,10 @@ export interface SaveItem {
   edited: boolean
   subtype: string | null
   sourceUuid: string | null
+  /** Hidden at the source (the phone's Hidden album, a vault's Hidden). Saved hidden, so it is encrypted. */
+  hidden?: boolean
+  /** When it went into the source's Recently Deleted. Saved into the vault's Recently Deleted. */
+  deletedAt?: number | null
   /**
    * Where `t` came from. 'phone' (the default) and the vault's own values are
    * trusted as they are: a date the person corrected on the phone lives in its
@@ -157,7 +162,7 @@ export async function saveToVault(
         result.alreadyThere++
         result.assets[item.key] = existing
         // Already here, but maybe not in this album yet.
-        linkAlbums(db, layout.media, existing, item.key, relevantAlbums, albumIds)
+        await linkAlbums(db, layout.media, existing, item.key, relevantAlbums, albumIds)
       } else {
         const outcome = await saveItem(vault, item, relevantAlbums, albumIds, opts,
           fileIndex => progress.file(index, fileIndex), () => progress.finishing(), existing)
@@ -195,9 +200,16 @@ export function existingInVault(db: Db, items: SaveItem[]): Map<string, number> 
   return out
 }
 
+/**
+ * Which vault items count as "already there". A deleted item from the source
+ * matches the vault's Recently Deleted too, so saving it twice doesn't copy it
+ * twice; anything else matches only items that aren't deleted.
+ */
+const liveFor = (item: SaveItem) => (item.deletedAt != null ? '' : 'AND a.deleted_at IS NULL')
+
 function findExisting(db: Db, item: SaveItem): number | null {
   if (item.sourceUuid) {
-    const row = db.prepare(`SELECT id FROM asset WHERE source_uuid = ? AND deleted_at IS NULL`).get(item.sourceUuid) as
+    const row = db.prepare(`SELECT a.id FROM asset a WHERE a.source_uuid = ? ${liveFor(item)}`).get(item.sourceUuid) as
       | { id: number }
       | undefined
     if (row) return row.id
@@ -205,7 +217,7 @@ function findExisting(db: Db, item: SaveItem): number | null {
   const master = item.files.find((f) => f.role === 'master')
   if (master?.sha256 && item.kind !== 'burst') {
     const row = db
-      .prepare(`SELECT f.asset_id FROM file f JOIN asset a ON a.id = f.asset_id WHERE f.sha256 = ? AND a.kind <> 'burst' AND a.deleted_at IS NULL LIMIT 1`)
+      .prepare(`SELECT f.asset_id FROM file f JOIN asset a ON a.id = f.asset_id WHERE f.sha256 = ? AND a.kind <> 'burst' ${liveFor(item)} LIMIT 1`)
       .get(master.sha256) as { asset_id: number } | undefined
     if (row) return row.asset_id
   }
@@ -278,12 +290,12 @@ async function saveItem(
   const except = replacing ?? -1
   const dup = (item.kind === 'burst'
     ? matchingBurst(db, hashes, except)
-    : db.prepare(`SELECT f.asset_id FROM file f JOIN asset a ON a.id = f.asset_id WHERE f.sha256 = ? AND a.kind <> 'burst' AND a.deleted_at IS NULL AND a.id <> ? LIMIT 1`).get(master.sha, except)) as
+    : db.prepare(`SELECT f.asset_id FROM file f JOIN asset a ON a.id = f.asset_id WHERE f.sha256 = ? AND a.kind <> 'burst' ${liveFor(item)} AND a.id <> ? LIMIT 1`).get(master.sha, except)) as
     | { asset_id: number }
     | undefined
   if (dup) {
     for (const s of staged) fs.rmSync(s.tmp, { force: true })
-    linkAlbums(db, layout.media, dup.asset_id, item.key, albums, albumIds)
+    await linkAlbums(db, layout.media, dup.asset_id, item.key, albums, albumIds)
     return { assetId: null, bytes: 0, failed, dupAssetId: dup.asset_id }
   }
 
@@ -316,8 +328,8 @@ async function saveItem(
   const placed: { s: (typeof staged)[number]; rel: string }[] = []
   for (const s of staged) {
     const target = freeName(dir, s.file.name)
-    fs.renameSync(s.tmp, target)
-    fs.utimesSync(target, new Date(item.t), new Date(item.t))
+    await fs.promises.rename(s.tmp, target)
+    await fs.promises.utimes(target, new Date(item.t), new Date(item.t))
     bytes += s.bytes
     placed.push({ s, rel: path.relative(layout.media, target).split(path.sep).join('/') })
   }
@@ -358,8 +370,8 @@ async function saveItem(
       db
         .prepare(
           `INSERT INTO asset (kind, captured_utc, captured_offset, time_source, width, height, duration_ms,
-             favourite, has_adjustments, subtype, source_uuid, lat, lon, place_id, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             favourite, hidden, deleted_at, has_adjustments, subtype, source_uuid, lat, lon, place_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           item.kind === 'photo' ? 'still' : item.kind,
@@ -370,6 +382,10 @@ async function saveItem(
           height,
           item.dur,
           item.fav ? 1 : 0,
+          // Hidden or deleted at the source stays so here. The caller encrypts
+          // it straight after (privacyWork in private.ts finds it).
+          item.hidden || carried?.hidden ? 1 : 0,
+          item.deletedAt ?? null,
           item.edited ? 1 : 0,
           item.subtype,
           item.sourceUuid,
@@ -380,7 +396,6 @@ async function saveItem(
           now(),
         ).lastInsertRowid,
     )
-    if (carried?.hidden) db.prepare(`UPDATE asset SET hidden = 1 WHERE id = ?`).run(assetId)
     for (const p of placed) {
       if (p.s.file.role === 'sidecar') {
         db.prepare(`INSERT OR REPLACE INTO aae (asset_id, plist, editor) VALUES (?, ?, NULL)`).run(
@@ -406,10 +421,10 @@ async function saveItem(
     }
   })()
 
-  linkAlbums(db, layout.media, assetId, item.key, albums, albumIds)
+  await linkAlbums(db, layout.media, assetId, item.key, albums, albumIds)
   for (const a of carried?.albums ?? []) {
     db.prepare(`INSERT OR IGNORE INTO album_asset (album_id, asset_id, position) VALUES (?, ?, ?)`).run(a.album_id, assetId, a.position)
-    if (a.folder) linkInto(db, layout.media, assetId, a.folder)
+    if (a.folder) await linkInto(db, layout.media, assetId, a.folder)
   }
   return { assetId, bytes, failed, replaced: replacing !== null }
 }
@@ -442,7 +457,7 @@ function ensureAlbum(db: Db, root: string, a: SaveAlbum, at: number): { id: numb
  * Put an asset in every album it belongs to: a row for the app, and a hard
  * link in the album's folder for File Explorer.
  */
-function linkAlbums(
+async function linkAlbums(
   db: Db,
   media: string,
   assetId: number,
@@ -456,25 +471,40 @@ function linkAlbums(
     if (pos < 0) continue
     const al = albumIds.get(a.uuid)!
     db.prepare(`INSERT OR IGNORE INTO album_asset (album_id, asset_id, position) VALUES (?, ?, ?)`).run(al.id, assetId, pos)
-    linkInto(db, media, assetId, al.folder, files)
+    await linkInto(db, media, assetId, al.folder, files)
   }
 }
 
-/** A hard link (or a copy) of each of the asset's files in an album folder. */
-function linkInto(db: Db, media: string, assetId: number, albumFolder: string,
+/**
+ * A hard link (or a copy) of each of the asset's files in an album folder.
+ * Asynchronous: on a drive without hard links (exFAT, FAT, as many USB drives
+ * come) each is a whole copy, and a synchronous copy of a video froze the
+ * window for as long as it took.
+ */
+/** An asset's files linked into the folder of every album it is in: for copies added to albums outside a save. */
+export async function linkIntoAlbumFolders(db: Db, media: string, assetId: number): Promise<void> {
+  const folders = db.prepare(`SELECT al.folder FROM album_asset x JOIN album al ON al.id = x.album_id WHERE x.asset_id = ? AND al.folder IS NOT NULL`)
+    .all(assetId) as { folder: string }[]
+  for (const f of folders) await linkInto(db, media, assetId, f.folder)
+}
+
+async function linkInto(db: Db, media: string, assetId: number, albumFolder: string,
   files = db.prepare(`SELECT path FROM file WHERE asset_id = ?`).all(assetId) as { path: string }[]) {
   const folder = path.join(media, ...albumFolder.split('/'))
-  fs.mkdirSync(folder, { recursive: true })
+  await fs.promises.mkdir(folder, { recursive: true })
   for (const f of files) {
     const src = path.join(media, ...f.path.split('/'))
     if (path.dirname(src) === folder) continue
     const dest = path.join(folder, path.basename(src))
-    if (fs.existsSync(dest)) continue
     try {
-      fs.linkSync(src, dest)
-    } catch {
-      // exFAT and FAT have no hard links. A copy keeps the folder complete.
-      fs.copyFileSync(src, dest)
+      await fs.promises.link(src, dest)
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'EEXIST') continue
+      // exFAT and FAT have no hard links. A copy keeps the folder complete,
+      // without replacing anything already there.
+      await fs.promises.copyFile(src, dest, fs.constants.COPYFILE_EXCL).catch((err: NodeJS.ErrnoException) => {
+        if (err.code !== 'EEXIST') throw err
+      })
     }
   }
 }
@@ -509,19 +539,22 @@ async function fetchOnce(
   progress: SaveFileProgress,
 ): Promise<{ tmp: string; sha: string; bytes: number }> {
   const hash = createHash('sha256')
-  const fd = fs.openSync(tmp, 'w')
+  // Asynchronous writes and fsync: on a USB hard drive a synchronous fsync
+  // held the main thread for over half a second per file, and the window with
+  // it (scripts/bench-save-lag.ts).
+  const fh = await fs.promises.open(tmp, 'w')
   let bytes = 0
   try {
     for await (const chunk of file.read()) {
       if (opts.signal?.aborted) throw new SaveCancelled()
-      fs.writeSync(fd, chunk)
       hash.update(chunk)
+      await writeAll(fh, chunk)
       bytes += chunk.length
       progress.copied(chunk.length)
     }
-    fs.fsyncSync(fd)
+    await fh.sync()
   } finally {
-    fs.closeSync(fd)
+    await fh.close()
   }
   const sha = hash.digest('hex')
 
@@ -545,14 +578,22 @@ async function fetchOnce(
   return { tmp, sha, bytes }
 }
 
-async function hashFile(file: string, onBytes: (n: number) => void, signal?: AbortSignal): Promise<string> {
-  const hash = createHash('sha256')
-  for await (const chunk of fs.createReadStream(file, { highWaterMark: 4 * 1024 * 1024 })) {
-    if (signal?.aborted) throw new SaveCancelled()
-    hash.update(chunk)
-    onBytes(chunk.length)
+/** FileHandle.write may write less than asked; loop until all of it is down. */
+async function writeAll(fh: fs.promises.FileHandle, chunk: Buffer): Promise<void> {
+  for (let off = 0; off < chunk.length; ) {
+    const { bytesWritten } = await fh.write(chunk, off, chunk.length - off)
+    off += bytesWritten
   }
-  return hash.digest('hex')
+}
+
+/** Waits for the file to be closed too, so the rename that follows can't hit EPERM (see hash.ts). */
+async function hashFile(file: string, onBytes: (n: number) => void, signal?: AbortSignal): Promise<string> {
+  try {
+    return await sha256Of(file, { signal, onBytes })
+  } catch (e) {
+    if (signal?.aborted) throw new SaveCancelled()
+    throw e
+  }
 }
 
 function freeName(dir: string, name: string): string {

@@ -1,3 +1,4 @@
+import fs from 'node:fs'
 import path from 'node:path'
 import sharp from 'sharp'
 import { createHash } from 'node:crypto'
@@ -6,7 +7,8 @@ import { JobQueue } from '../src/jobs/queue.ts'
 import { createVault, type OpenVault } from '../src/vault/vault.ts'
 import { saveToVault, type SaveItem } from '../src/vault/save.ts'
 import { queueThumbnails, runThumbnails } from '../src/thumbs/jobs.ts'
-import { EMBED, forgetSearchData, indexProgress, queueEmbeddings, queueOcr, queueSearchJobs, relevanceCutoff, runEmbeddings, runSearchJobs, searchVault } from '../src/search/index.ts'
+import { SIZES, thumbPath, type ThumbSize } from '../src/thumbs/render.ts'
+import { EMBED, forgetSearchData, indexProgress, queueEmbeddings, queueOcr, queueSearchJobs, relevanceCutoff, retryMissingThumbnailJobs, runEmbeddings, runSearchJobs, searchVault } from '../src/search/index.ts'
 import type { ReadText } from '../src/search/ocr.ts'
 import { OCR_KEY } from '../src/search/ocr-model.ts'
 import { textMarks, textMatches, wordMatch } from '../src/search/text.ts'
@@ -268,5 +270,32 @@ describe('search index', () => {
     expect(wordMatch('cart', 'card')).toBe(0)
     expect(wordMatch('1234', '1243')).toBe(0)
     expect(wordMatch('आधार', 'आधारकार्ड')).toBeGreaterThan(0)
+  })
+})
+
+describe('an item whose thumbnails are missing', () => {
+  // Hiding an item removes its thumbnails; unhiding it used to leave search
+  // giving up on it for good ("no thumbnail to read"), so it never came back
+  // into search, text search or People.
+  it('is waited for, not given up on, and is read once its thumbnail is back', async () => {
+    const sha = (v.db.prepare('SELECT sha256 FROM file WHERE asset_id = ?').get(ids.beach) as { sha256: string }).sha256
+    const saved = new Map<string, Buffer>()
+    for (const size of Object.keys(SIZES) as ThumbSize[]) {
+      const p = thumbPath(v.layout.cache, sha, size)
+      saved.set(p, fs.readFileSync(p))
+      fs.rmSync(p)
+    }
+    queueSearchJobs(v.db, queue, { embed: fake })
+    await runSearchJobs(v.db, queue, v.layout.cache, { embed: fake }, { retryBaseMs: 1, maxAttempts: 2 })
+    const job = () => v.db.prepare(`SELECT state, last_error FROM job WHERE kind = ? AND asset_id = ?`).get(EMBED, ids.beach) as { state: string; last_error: string }
+    expect(job().state).toBe('failed')
+    expect(job().last_error).toMatch(/no thumbnail to read/)
+
+    // A vault from before: such jobs are queued again when it opens.
+    expect(retryMissingThumbnailJobs(v.db)).toBe(1)
+    for (const [p, bytes] of saved) fs.writeFileSync(p, bytes)
+    await runSearchJobs(v.db, queue, v.layout.cache, { embed: fake }, {})
+    expect(job().state).toBe('done')
+    expect(searchVault(v.db, await fake.query('beach'), 'beach').map((h) => h.assetId)).toContain(ids.beach)
   })
 })

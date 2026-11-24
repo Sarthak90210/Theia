@@ -12,7 +12,10 @@ describe('app settings', () => {
   it('preserves a map privacy choice across restarts, independently of vault settings', () => {
     fs.writeFileSync(path.join(s.dir, 'gallery.json'), '{"vaults":["unchanged"]}')
     const store = new SettingsStore(s.dir)
-    expect(store.get().mapsEnabled).toBe(true)
+    // Off until chosen: a map sends the photo's area to OpenStreetMap.
+    expect(store.get().mapsEnabled).toBe(false)
+    store.set({ mapsEnabled: true })
+    expect(new SettingsStore(s.dir).get().mapsEnabled).toBe(true)
     store.set({ mapsEnabled: false })
     expect(new SettingsStore(s.dir).get().mapsEnabled).toBe(false)
     expect(JSON.parse(fs.readFileSync(path.join(s.dir, 'gallery.json'), 'utf8'))).toEqual({ vaults: ['unchanged'] })

@@ -1,6 +1,8 @@
+import { Fragment } from 'react'
 import type { AppState, Collections, SourceId } from '../shared/api.ts'
 import * as I from './icons.tsx'
 import { count } from './format.ts'
+import { HiddenFolderRows } from './HiddenFolders.tsx'
 
 const SMART_ICON: Record<string, (p: { size?: number }) => React.ReactElement> = {
   library: I.Grid,
@@ -28,13 +30,14 @@ export interface SidebarProps {
   onVaultOptions: (id: SourceId) => void
   onSettings: () => void
   onShortcuts: () => void
+  onError: (message: string) => void
 }
 
 /**
  * Phones, then vaults, then whatever the selected one contains. Phones appear
  * here by themselves when plugged in and go when unplugged.
  */
-export function Sidebar({ state, source, collections, collection, onSource, onCollection, onOpenVault, onAddFolderToVault, onVaultOptions, onSettings, onShortcuts }: SidebarProps) {
+export function Sidebar({ state, source, collections, collection, onSource, onCollection, onOpenVault, onAddFolderToVault, onVaultOptions, onSettings, onShortcuts, onError }: SidebarProps) {
   const noPhoneButSeen =
     state.devices.length === 0 && state.diagnosis && state.diagnosis.layers.some((l) => l.id === 'usb' && l.status === 'ok')
 
@@ -91,6 +94,23 @@ export function Sidebar({ state, source, collections, collection, onSource, onCo
             </button>
           </div>
         ))}
+        {(state.offlineVaults ?? []).map((o) => (
+          <div key={o.root} className="side-row offline">
+            <div className="side-item" aria-disabled="true" title={`${o.root}\nPlug in its drive and it opens by itself.`}>
+              <I.Vault />
+              <span className="side-label">{o.name}</span>
+              <span className="side-count">not connected</span>
+            </div>
+            <button
+              className="side-more"
+              aria-label={`Stop listing ${o.name}`}
+              title="Stop listing this vault (nothing on the drive is touched)"
+              onClick={() => void window.photos.forgetVault(o.root)}
+            >
+              <span aria-hidden="true">×</span>
+            </button>
+          </div>
+        ))}
         <button className="side-item subtle" onClick={onOpenVault}>
           <I.Plus />
           <span className="side-label">Open or create vault…</span>
@@ -139,11 +159,17 @@ export function Sidebar({ state, source, collections, collection, onSource, onCo
           </div>
           <div className="side-section">
             <div className="side-heading">Utilities</div>
-            {collections.smart.filter(c => c.kind === 'utility').map(c => <button key={c.id}
-              className={`side-item ${collection === c.id ? 'active' : ''}`} aria-current={collection === c.id ? 'page' : undefined} onClick={() => onCollection(c.id)}>
-              {c.id === 'hidden' ? <I.Hidden /> : <I.Trash />}
-              <span className="side-label">{c.name}</span><span className="side-count">{count(c.count)}</span>
-            </button>)}
+            {collections.smart.filter(c => c.kind === 'utility').map(c => <Fragment key={c.id}>
+              <button
+                className={`side-item ${collection === c.id ? 'active' : ''}`} aria-current={collection === c.id ? 'page' : undefined} onClick={() => onCollection(c.id)}>
+                {c.id === 'hidden' ? <I.Hidden /> : <I.Trash />}
+                <span className="side-label">{c.name}</span><span className="side-count">{count(c.count)}</span>
+              </button>
+              {/* Folders in Hidden: only sent while it is unlocked. */}
+              {c.id === 'hidden' && collections.hiddenFolders && source && (
+                <HiddenFolderRows source={source} folders={collections.hiddenFolders} collection={collection} onCollection={onCollection} onError={onError} />
+              )}
+            </Fragment>)}
           </div>
           {collections.albums.length > 0 && (
             <div className="side-section">

@@ -18,12 +18,13 @@ export function VaultActions({ source, keys, collection, onEdit, onChanged, onEr
   const [busy, setBusy] = useState(false)
   const [confirm, setConfirm] = useState<{ action: 'remove' | 'purge'; keys: string[] } | null>(null)
   const deleted = collection === 'deleted'
+  const hidden = collection === 'hidden' || collection.startsWith('hidden:')
 
   const run = async (action: Action, selected = keys) => {
     setBusy(true)
     setConfirm(null)
     try {
-      if (action === 'hide') await window.photos.setHidden(source, selected, collection !== 'hidden')
+      if (action === 'hide') await window.photos.setHidden(source, selected, !hidden)
       if (action === 'favourite') await window.photos.setFavourite(source, selected, collection !== 'favourites')
       if (action === 'remove' || action === 'purge') await deleteItems(source, selected, action, onError)
       if (action === 'restore') await window.photos.restore(source, selected)
@@ -38,7 +39,7 @@ export function VaultActions({ source, keys, collection, onEdit, onChanged, onEr
         <button className="ghost vault-action-delete" aria-label="Delete permanently" disabled={!keys.length || busy} onClick={() => setConfirm({ action: 'purge', keys: [...keys] })} title="Delete selected items permanently"><I.Trash size={16} /><span>Delete permanently</span></button>
       </> : <>
         <button className="ghost vault-action-edit" aria-label="Edit" disabled={keys.length !== 1 || busy} onClick={onEdit} title="Edit selected item"><I.Sliders size={16} /><span>Edit</span></button>
-        <button className="ghost" aria-label={collection === 'hidden' ? 'Unhide' : 'Hide'} disabled={!keys.length || busy} onClick={() => void run('hide')} title={collection === 'hidden' ? 'Return selected items to the library' : 'Move selected items to Hidden'}><I.Hidden size={16} /><span>{collection === 'hidden' ? 'Unhide' : 'Hide'}</span></button>
+        <button className="ghost" aria-label={hidden ? 'Unhide' : 'Hide'} disabled={!keys.length || busy} onClick={() => void run('hide')} title={hidden ? 'Return selected items to the library' : 'Move selected items to Hidden'}><I.Hidden size={16} /><span>{hidden ? 'Unhide' : 'Hide'}</span></button>
         <button className="ghost" aria-label={collection === 'favourites' ? 'Unfavourite' : 'Favourite'} disabled={!keys.length || busy} onClick={() => void run('favourite')} title={collection === 'favourites' ? 'Remove from Favourites' : 'Add to Favourites'}><I.Heart size={16} /><span>{collection === 'favourites' ? 'Unfavourite' : 'Favourite'}</span></button>
         <button className="ghost vault-action-delete" aria-label="Delete" disabled={!keys.length || busy} onClick={() => setConfirm({ action: 'remove', keys: [...keys] })} title="Move selected items to Recently Deleted"><I.Trash size={16} /><span>Delete</span></button>
       </>}

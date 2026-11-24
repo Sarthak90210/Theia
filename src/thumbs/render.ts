@@ -42,9 +42,18 @@ export function hasThumbs(cacheRoot: string, sha256: string): boolean {
   return (Object.keys(SIZES) as ThumbSize[]).every((s) => fs.existsSync(thumbPath(cacheRoot, sha256, s)))
 }
 
+/** The same, without blocking: for the app's main process, where it runs per job. */
+export async function hasThumbsAsync(cacheRoot: string, sha256: string): Promise<boolean> {
+  const there = await Promise.all((Object.keys(SIZES) as ThumbSize[]).map((s) =>
+    fs.promises.access(thumbPath(cacheRoot, sha256, s)).then(() => true, () => false)))
+  return there.every(Boolean)
+}
+
 export interface RenderDeps {
   heic: Pick<HeicPool, 'decode'>
   ffmpeg?: string
+  /** Render somewhere else (a separate process, render-host.ts) instead of in this one. */
+  render?: (request: { file: string; mime: string; sha256: string; cacheRoot: string }) => Promise<RenderResult>
 }
 
 export interface RenderResult {

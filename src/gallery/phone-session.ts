@@ -241,10 +241,18 @@ export class PhoneSession {
    * stream straight from the phone.
    */
   isPrivate(key: string): boolean {
-    this.privateKeys ??= new Set([...this.library.hidden, ...this.library.deleted])
-    return this.privateKeys.has(key)
+    return this.privacyOf(key) !== null
   }
-  private privateKeys: Set<string> | null = null
+
+  /** Which of the two it is in, if either. Saved into a vault, it lands in the same place there. */
+  privacyOf(key: string): 'hidden' | 'deleted' | null {
+    this.privateKeys ??= {
+      hidden: new Set(this.library.hidden),
+      deleted: new Set(this.library.deleted),
+    }
+    return this.privateKeys.deleted.has(key) ? 'deleted' : this.privateKeys.hidden.has(key) ? 'hidden' : null
+  }
+  private privateKeys: { hidden: Set<string>; deleted: Set<string> } | null = null
 
   /** The phone's small preview of an item, in memory. */
   async previewBytes(key: string): Promise<Buffer | null> {

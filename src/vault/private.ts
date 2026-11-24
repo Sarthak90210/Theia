@@ -5,6 +5,7 @@ import type { Db } from '../library/db.ts'
 import { thumbPath, SIZES, type ThumbSize } from '../thumbs/render.ts'
 import { createVaultKeys, decryptFile, encryptFile, encryptedSha256, openEncrypted, publicKeyOf, type EncryptedReader, type VaultKeyFile } from './private-crypto.ts'
 import type { OpenVault, VaultLayout } from './vault.ts'
+import { sha256Of } from './hash.ts'
 
 /**
  * Hidden and Recently Deleted, encrypted at rest.
@@ -131,35 +132,22 @@ function albumFolders(db: Db, media: string, assetId: number): string[] {
   ).map((r) => inside(media, r.folder))
 }
 
-function sha256File(file: string): string {
-  const hash = crypto.createHash('sha256')
-  const fd = fs.openSync(file, 'r')
-  try {
-    const buf = Buffer.alloc(4 * 1024 * 1024)
-    for (let pos = 0; ; ) {
-      const n = fs.readSync(fd, buf, 0, buf.length, pos)
-      if (!n) break
-      hash.update(buf.subarray(0, n))
-      pos += n
-    }
-  } finally {
-    fs.closeSync(fd)
-  }
-  return hash.digest('hex')
-}
-
-/** Every plain copy of a file: where it lives, and its links in album folders with the same bytes. */
-function plainCopies(media: string, folders: string[], f: FileRow): string[] {
+/**
+ * Every plain copy of a file: where it lives, and its links in album folders
+ * with the same bytes. Hashes asynchronously: hiding a long video must not
+ * freeze the window while its copies are checked.
+ */
+async function plainCopiesAsync(media: string, folders: string[], f: FileRow): Promise<string[]> {
   const main = inside(media, f.path)
   const out: string[] = []
-  if (fs.existsSync(main)) {
-    if (sha256File(main) !== f.sha256) throw new Error(`A different file now occupies ${f.path}; it has been retained.`)
+  if (await exists(main)) {
+    if ((await sha256Of(main)) !== f.sha256) throw new Error(`A different file now occupies ${f.path}; it has been retained.`)
     out.push(main)
   }
   for (const folder of folders) {
     const copy = path.join(folder, path.basename(main))
     noLinks(copy)
-    if (copy !== main && fs.existsSync(copy) && sha256File(copy) === f.sha256) out.push(copy)
+    if (copy !== main && (await exists(copy)) && (await sha256Of(copy)) === f.sha256) out.push(copy)
   }
   return out
 }
@@ -198,17 +186,30 @@ function sharedWithVisible(db: Db, f: FileRow, assetId: number): boolean {
     .get(f.sha256, assetId)
 }
 
-function removePlainCopies(vault: OpenVault, assetId: number, f: FileRow): number {
+/**
+ * Delete a file another reader may still have open for a moment (a thumbnail
+ * being made from it, the viewer, an antivirus scan). Windows refuses with
+ * EPERM or EBUSY until they let go; retry for up to about two seconds.
+ */
+function removeWhenFree(file: string, force = false): Promise<void> {
+  return fs.promises.rm(file, { force, maxRetries: 20, retryDelay: 100 })
+}
+
+async function removePlainCopies(vault: OpenVault, assetId: number, f: FileRow): Promise<number> {
   const { db, layout } = vault
-  const copies = plainCopies(layout.media, albumFolders(db, layout.media, assetId), f)
+  const copies = await plainCopiesAsync(layout.media, albumFolders(db, layout.media, assetId), f)
   const visible = db.prepare(`SELECT f.asset_id, f.path FROM file f JOIN asset a ON a.id = f.asset_id
     WHERE f.sha256 = ? AND f.asset_id != ? AND f.encrypted_path IS NULL AND a.hidden = 0 AND a.deleted_at IS NULL`).all(f.sha256, assetId) as { asset_id: number; path: string }[]
   const norm = (p: string) => process.platform === 'win32' ? p.toLowerCase() : p
   const visiblePaths = new Set(visible.flatMap(r => [inside(layout.media, r.path),
     ...albumFolders(db, layout.media, r.asset_id).map(folder => path.join(folder, path.basename(r.path))) ]).map(norm))
   if (copies.some(p => visiblePaths.has(norm(p)))) throw new Error('A plaintext path is shared with a visible item. Unshare that item before protecting this one.')
-  for (const p of copies) { noLinks(p); if (sha256File(p) !== f.sha256) throw new Error('The original changed while protection was running; it has been retained.'); fs.rmSync(p) }
-  if (!sharedWithVisible(db, f, assetId)) for (const p of cachedCopies(layout, f.sha256)) fs.rmSync(p, { force: true })
+  for (const p of copies) {
+    noLinks(p)
+    if ((await sha256Of(p)) !== f.sha256) throw new Error('The original changed while protection was running; it has been retained.')
+    await removeWhenFree(p)
+  }
+  if (!sharedWithVisible(db, f, assetId)) for (const p of cachedCopies(layout, f.sha256)) await removeWhenFree(p, true)
   return copies.length
 }
 
@@ -232,7 +233,7 @@ export async function protectAsset(vault: OpenVault, assetId: number, publicKey:
       throw new Error(`Can't protect ${f.path}: the file on disk no longer matches what was saved.`)
     }
     durable(db, () => { db.prepare(`UPDATE file SET encrypted_path = ? WHERE id = ?`).run(name, f.id) })
-    removePlainCopies(vault, assetId, f)
+    await removePlainCopies(vault, assetId, f)
   }
 }
 
@@ -249,15 +250,16 @@ export async function releaseAsset(vault: OpenVault, assetId: number, privateKey
     const blob = blobPath(layout, f.encrypted_path)
     const target = inside(layout.media, f.path)
     fs.mkdirSync(path.dirname(target), { recursive: true })
-    if (fs.existsSync(target) && sha256File(target) !== f.sha256) throw new Error(`A different file now occupies ${f.path}; nothing was overwritten.`)
-    if (!(fs.existsSync(target) && sha256File(target) === f.sha256)) {
+    const existing = fs.existsSync(target) ? await sha256Of(target) : null
+    if (existing !== null && existing !== f.sha256) throw new Error(`A different file now occupies ${f.path}; nothing was overwritten.`)
+    if (existing === null) {
       const sha = await decryptFile(blob, target, privateKey)
       if (sha !== f.sha256) {
         fs.rmSync(target, { force: true })
         throw new Error(`Can't restore ${f.path}: its encrypted copy doesn't hold the saved bytes.`)
       }
     }
-    if (sha256File(target) !== f.sha256) throw new Error(`The restored copy of ${f.path} failed its read-back check.`)
+    if ((await sha256Of(target)) !== f.sha256) throw new Error(`The restored copy of ${f.path} failed its read-back check.`)
     for (const folder of folders) {
       const copy = path.join(folder, path.basename(target))
       noLinks(copy)
@@ -266,7 +268,7 @@ export async function releaseAsset(vault: OpenVault, assetId: number, privateKey
       try {
         fs.linkSync(target, copy)
       } catch {
-        fs.copyFileSync(target, copy) // drives without hard links
+        await fs.promises.copyFile(target, copy) // drives without hard links: a whole copy, so not synchronously
       }
     }
     durable(db, () => { db.prepare(`UPDATE file SET encrypted_path = NULL WHERE id = ?`).run(f.id) })
@@ -300,26 +302,30 @@ export function privacyWork(db: Db): { protect: number[]; release: number[] } {
  * copy. Authenticating a blob requires unlocking; only finishPrivateCleanup
  * may remove plaintext leftovers after that succeeds.
  */
-export function sweepPrivate(vault: OpenVault): { orphans: number; leftovers: number; missing: string[] } {
+export async function sweepPrivate(vault: OpenVault): Promise<{ orphans: number; leftovers: number; missing: string[] }> {
+  // Asynchronous: it runs as a vault opens, and checks every hidden file (and
+  // its album links) on what is often a USB hard drive.
   const { db, layout } = vault
   const dir = privateDir(layout)
   noLinks(dir)
   const out = { orphans: 0, leftovers: 0, missing: [] as string[] }
-  if (!fs.existsSync(dir)) return out
+  if (!(await exists(dir))) return out
   const rows = db.prepare(`SELECT id, asset_id, path, sha256, encrypted_path FROM file WHERE encrypted_path IS NOT NULL`).all() as (FileRow & {
     asset_id: number
   })[]
   const referenced = new Set(rows.map((r) => r.encrypted_path!))
-  for (const n of fs.readdirSync(dir)) {
+  for (const n of await fs.promises.readdir(dir)) {
     if ((n.endsWith('.tmp') || n.endsWith('.theia')) && !referenced.has(n)) out.orphans++
   }
   for (const r of rows) {
-    if (!fs.existsSync(blobPath(layout, r.encrypted_path!))) out.missing.push(r.path)
-    for (const p of plainCopies(layout.media, albumFolders(db, layout.media, r.asset_id), r)) {
-      out.leftovers++
-    }
+    if (!(await exists(blobPath(layout, r.encrypted_path!)))) out.missing.push(r.path)
+    out.leftovers += (await plainCopiesAsync(layout.media, albumFolders(db, layout.media, r.asset_id), r)).length
   }
   return out
+}
+
+function exists(file: string): Promise<boolean> {
+  return fs.promises.access(file).then(() => true, () => false)
 }
 
 /** Only an authenticated, readable encrypted copy may replace plaintext after a crash. */
@@ -329,7 +335,7 @@ export async function finishPrivateCleanup(vault: OpenVault, key: KeyObject): Pr
   for (const row of rows) {
     const blob = blobPath(vault.layout, row.encrypted_path!)
     if (await encryptedSha256(blob, key) !== row.sha256) throw new Error(`Encrypted backup for ${row.path} failed its read-back check; plaintext was retained.`)
-    removed += removePlainCopies(vault, row.asset_id, row)
+    removed += await removePlainCopies(vault, row.asset_id, row)
   }
   return removed
 }

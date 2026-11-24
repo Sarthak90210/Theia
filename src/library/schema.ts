@@ -441,4 +441,27 @@ export const MIGRATIONS: string[] = [
   );
   CREATE INDEX idx_face_maybe_person ON face_maybe(person_id);
   `,
+
+  /* --------------------------------------------------------------- v19 */ `
+  -- Claiming the next job sorted every queued job by its asset's capture time:
+  -- a temporary B-tree per claim, 2 ms with 11,000 queued, so a large import
+  -- cost O(n^2 log n) on the main thread. The capture time now lives on the
+  -- job, and a partial index over queued jobs hands back the next one directly.
+  ALTER TABLE job ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
+  UPDATE job SET priority = COALESCE((SELECT captured_utc FROM asset WHERE asset.id = job.asset_id), -1000000000000000);
+  CREATE INDEX idx_job_claim ON job(kind, priority DESC, id) WHERE state = 'queued';
+  `,
+
+  /* --------------------------------------------------------------- v20 */ `
+  -- Folders inside Hidden, all opened by the vault's one passcode. An item in
+  -- Hidden may be in one of them; deleting a folder leaves its items hidden.
+  CREATE TABLE hidden_folder (
+    id         INTEGER PRIMARY KEY,
+    name       TEXT NOT NULL,
+    position   INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+  );
+  ALTER TABLE asset ADD COLUMN hidden_folder_id INTEGER REFERENCES hidden_folder(id) ON DELETE SET NULL;
+  CREATE INDEX idx_asset_hidden_folder ON asset(hidden_folder_id) WHERE hidden_folder_id IS NOT NULL;
+  `,
 ]

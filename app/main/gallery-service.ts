@@ -11,11 +11,12 @@ import { HeicPool } from '../../src/thumbs/heic-pool.ts'
 import { ExifToolReader } from '../../src/metadata/reader.ts'
 import { JobQueue } from '../../src/jobs/queue.ts'
 import { openSource, renderThumbnails, thumbPath, type ThumbSize } from '../../src/thumbs/render.ts'
-import { queueThumbnails, runThumbnails, THUMBNAIL } from '../../src/thumbs/jobs.ts'
+import { requeueMissingThumbnails, runThumbnails, THUMBNAIL } from '../../src/thumbs/jobs.ts'
+import { RenderHost, type ChildLike } from '../../src/thumbs/render-host.ts'
 import { NoPhotoFoldersError, PhoneSession, mimeOf } from '../../src/gallery/phone-session.ts'
-import { displayFile, vaultCollections, vaultDetail, vaultFiles, vaultItems, vaultItemsByIds } from '../../src/gallery/vault-gallery.ts'
+import { displayFile, hiddenFolders, vaultCollections, vaultDetail, vaultFiles, vaultItems, vaultItemsByIds } from '../../src/gallery/vault-gallery.ts'
 import { Embedder } from '../../src/search/embedder.ts'
-import { forgetSearchData, indexProgress, queueSearchJobs, runSearchJobs, searchVault } from '../../src/search/index.ts'
+import { forgetSearchData, indexProgress, queueSearchJobs, retryMissingThumbnailJobs, runSearchJobs, searchVault } from '../../src/search/index.ts'
 import { deepProgress, queueDeep, runDeep, type DeepStages } from '../../src/search/deep.ts'
 import { answerMaybes, findMaybes, listMaybes } from '../../src/people/maybe.ts'
 import { OcrReader } from '../../src/search/ocr.ts'
@@ -58,7 +59,7 @@ import { editPreview } from '../../src/media/edit.ts'
 import type { EditRecipe } from '../../src/media/edit-recipe.ts'
 import { convert, planFor, probe, storyboard as makeStoryboard, type Plan, type Probe } from '../../src/media/playback.ts'
 import type { ByteSource } from '../../src/media/ranges.ts'
-import { sameVaultName, searchQueryOf, type AppState, type MaybeFace, type SaveRequest, type SaveState, type SourceId, type StoryboardInfo, type VaultDetails, type VaultInfo } from '../shared/api.ts'
+import { sameVaultName, searchQueryOf, type AppState, type MaybeFace, type OfflineVaultInfo, type SaveRequest, type SaveState, type SourceId, type StoryboardInfo, type VaultDetails, type VaultInfo } from '../shared/api.ts'
 import { PACE_REST, type AppSettings } from '../shared/settings.ts'
 import { SettingsStore } from './settings.ts'
 import { folderBytes, validateVaultDeletion } from '../../src/vault/manage.ts'
@@ -106,6 +107,12 @@ export interface ServiceDeps {
    * and ppocr (text in photos). Each kind of search is off when its model is missing.
    */
   modelsDir?: string | null
+  /**
+   * Start the thumbnail process (src/thumbs/render-host.ts). Without it,
+   * thumbnails render in this process, and a native crash in a decoder takes
+   * the app down with it.
+   */
+  spawnThumbnailProcess?: () => ChildLike
 }
 
 interface VaultEntry {
@@ -125,6 +132,9 @@ interface VaultEntry {
 
 /** Errors the window recognises and answers with the right dialog. */
 const NEEDS_PROTECTION = 'PROTECTION_NEEDED: Set a passcode for Hidden and Recently Deleted first.'
+/** The same, for a vault other than the one on screen: the window opens set-up for that vault. */
+const needsProtectionIn = (id: SourceId, name: string) =>
+  `PROTECTION_NEEDED[${id}]: Some of these are hidden or recently deleted. Set a passcode for Hidden and Recently Deleted in ${name} first, so they stay private there.`
 const NEEDS_UNLOCK = 'LOCKED: Unlock Hidden and Recently Deleted first.'
 
 const DEFAULT_LIBRARY = process.platform === 'win32' ? 'D:\\PhotosLibrary' : path.join(os.homedir(), 'PhotosLibrary')
@@ -138,6 +148,8 @@ export class GalleryService {
   private readonly watcher = new DeviceWatcher()
   // A quarter of the processor for HEIC decoding: thumbnails run in the
   // background and should leave room for everything else.
+  /** Thumbnails in their own process, when the app can start one (see ServiceDeps). */
+  private readonly renderHost: RenderHost | null
   private readonly heic = new HeicPool(Math.max(1, Math.min(Math.floor(os.cpus().length / 4), 4)))
   private readonly metadata = new ExifToolReader()
   private save: SaveState = { status: 'idle' }
@@ -147,11 +159,25 @@ export class GalleryService {
   private thumbnailRun: Promise<void> | null = null
   private stopping = false
   private readonly rendering = new Map<string, Promise<void>>()
+  /**
+   * Pictures that failed to render on demand this session. Not tried again
+   * each time their tile scrolls back into view: a file that crashes the
+   * decoder would crash the thumbnail process every time, and could take
+   * background jobs that happened to be running with it.
+   */
+  private readonly renderFailed = new Set<string>()
   private publishTimer: NodeJS.Timeout | null = null
   private converting: AppState['converting'] = null
   private readonly probes = new Map<string, Probe>()
   private readonly placesChecked = new WeakMap<PhoneSession, WeakSet<OpenVault>>()
   private readonly savingVaults = new Set<SourceId>()
+  /**
+   * Vaults whose drive is not connected, by folder: remembered, shown as not
+   * connected, and opened again by themselves when the drive comes back.
+   */
+  private readonly offline = new Map<string, OfflineVaultInfo>()
+  private driveWatch: NodeJS.Timeout | null = null
+  private drivesChecking: Promise<void> | null = null
   /** Vaults being closed: the thumbnail run leaves them alone. */
   private readonly closingVaults = new Set<SourceId>()
   /** The thumbnail drain working on a vault now, so closing it can stop just that one. */
@@ -174,6 +200,7 @@ export class GalleryService {
   private searchIndexing: AppState['search']['indexing'] = null
 
   constructor(private readonly deps: ServiceDeps) {
+    this.renderHost = deps.spawnThumbnailProcess ? new RenderHost(deps.spawnThumbnailProcess) : null
     this.settings = new SettingsStore(deps.userData)
     const gemma = deps.modelsDir ? path.join(deps.modelsDir, MODEL_NAME) : null
     const ppocr = deps.modelsDir ? path.join(deps.modelsDir, OCR_NAME) : null
@@ -260,13 +287,24 @@ export class GalleryService {
   }
 
   start() {
-    for (const root of this.loadVaultList()) {
+    for (const { root, name } of this.loadVaultList()) {
+      // A vault on a drive that isn't plugged in: remembered, and opened when it is.
+      if (!driveThere(root)) {
+        this.offline.set(root, { root, name: name ?? path.basename(root) })
+        continue
+      }
+      if (!isVault(root)) continue // its folder was deleted or moved
       try {
         this.addVault(root)
       } catch (e) {
         console.error(`could not open vault ${root}:`, (e as Error).message)
+        this.offline.set(root, { root, name: name ?? path.basename(root) })
       }
     }
+    // Drives come and go: notice a vault's drive being unplugged before
+    // anything trips over it, and reopen it when it is plugged back in.
+    this.driveWatch = setInterval(() => void this.checkDrives(), DRIVE_CHECK_MS)
+    this.driveWatch.unref?.()
     this.registry.on('change', () => {
       this.backfillPlaces()
       this.forgetPhonePrivate()
@@ -281,6 +319,7 @@ export class GalleryService {
 
   async stop() {
     this.stopping = true
+    if (this.driveWatch) clearInterval(this.driveWatch)
     this.saveAbort?.abort()
     this.watcher.stop()
     await this.registry.stop()
@@ -295,8 +334,11 @@ export class GalleryService {
     await Promise.all([...this.rendering.values()].map(job => job.catch(() => {})))
     await Promise.all([...this.vaults.values()].map(v => v.privacy.catch(() => {})))
     await this.heic.close()
+    this.renderHost?.close()
     await this.metadata.close().catch(() => {})
-    for (const v of this.vaults.values()) v.vault.db.close()
+    for (const v of this.vaults.values()) {
+      try { v.vault.db.close() } catch { /* its drive is gone */ }
+    }
   }
 
   snapshot(): AppState {
@@ -313,7 +355,17 @@ export class GalleryService {
     return {
       settings: this.settings.get(),
       devices,
-      vaults: [...this.vaults.values()].map((v) => this.vaultInfo(v)),
+      vaults: [...this.vaults.values()].flatMap((v) => {
+        try {
+          return [this.vaultInfo(v)]
+        } catch (e) {
+          // Most likely its drive was just unplugged: check, and close it if so.
+          console.warn(`vault ${v.vault.manifest.name}:`, (e as Error).message)
+          void this.checkDrives()
+          return []
+        }
+      }),
+      offlineVaults: [...this.offline.values()],
       diagnosis: anyReady ? null : (this.watcher.current.diagnosis ?? null),
       save: this.save,
       thumbnails: this.thumbs,
@@ -360,6 +412,29 @@ export class GalleryService {
   }
 
   /** How long background work rests after each photo, from the chosen pace. */
+  /** Until when the person is busy in the window (scrolling): background jobs hold off till then. */
+  private userBusyUntil = 0
+
+  /** The window says the person is scrolling; called at most a few times a second. */
+  userActive(): void {
+    this.userBusyUntil = Date.now() + 700
+  }
+
+  /** Hiding or restoring (encrypting or decrypting files) going on, in any vault. */
+  private privacyRunning = 0
+
+  /**
+   * How long background jobs (thumbnails, search, people, the closer look)
+   * hold off before starting another: while the person scrolls, and for as
+   * long as a save, import, hide or restore runs. Those read and write the
+   * same drive, and one spinning disk read from in several places at once
+   * does less in total, not more: measured on a USB hard drive, 25 to 35% less.
+   */
+  private yieldTo(): number {
+    if (this.save.status === 'running' || this.privacyRunning > 0) return 1000
+    return Math.max(0, this.userBusyUntil - Date.now())
+  }
+
   private rest(): number {
     return PACE_REST[this.settings.get().indexingPace] ?? 0.5
   }
@@ -541,6 +616,8 @@ export class GalleryService {
     const v = this.vaults.get(source)
     if (v) {
       const c = vaultCollections(v.vault.db)
+      // Their names and sizes say something too: only while Hidden is open.
+      if (v.privateKey) c.hiddenFolders = hiddenFolders(v.vault.db)
       if (this.peopleOn()) {
         const people = listPeople(v.vault.db)
         c.people = { count: people.length, unnamed: people.filter((p) => p.name === null).length }
@@ -559,6 +636,7 @@ export class GalleryService {
       if (!this.peopleOn()) return []
       return vaultItemsByIds(v.vault.db, personAssetIds(v.vault.db, Number(collection.slice(7))))
     }
+    if (v && /^hidden:\d+$/.test(collection) && !v.privateKey) return []
     if (v) return vaultItems(v.vault.db, collection)
     // Strip the phone-only fields; the window needs only the tile.
     const s = this.phone(source)
@@ -649,6 +727,8 @@ export class GalleryService {
       }
       const files = vaultFiles(pv.vault.db, key.split('~')[0]!)
       if (files.some((f) => f.encryptedPath)) return this.protectedMedia(pv, files, what, key)
+      // The grid's path: one lookup of the files, not one per step.
+      if (what === 'sm' || what === 'lg' || what === 'ph') return this.vaultMedia(pv, what, key, files)
     } else {
       const s = this.registry.get(source.replace(/^device:/, ''))?.session
       if (s?.isPrivate(key)) return this.phonePrivateMedia(s, what, key)
@@ -714,19 +794,22 @@ export class GalleryService {
     return { path: out, mime: 'image/webp' }
   }
 
-  private async vaultMedia(v: VaultEntry, what: string, key: string) {
+  private async vaultMedia(v: VaultEntry, what: string, key: string, known?: ReturnType<typeof vaultFiles>) {
     // `<asset>~<file>` asks for one particular file, such as a burst frame.
     const [assetKey, fileId] = key.split('~')
-    const files = vaultFiles(v.vault.db, assetKey!)
+    const files = known ?? vaultFiles(v.vault.db, assetKey!)
     const shown = displayFile(files, fileId ? Number(fileId) : null)
     if (!shown) return null
     const abs = (rel: string) => path.join(v.vault.layout.media, ...rel.split('/'))
 
     if (what === 'sm' || what === 'lg' || what === 'ph') {
       const p = thumbPath(v.vault.layout.cache, shown.sha256, what as ThumbSize)
-      if (!fs.existsSync(p)) await this.renderNow(v, shown.sha256, abs(shown.path), shown.mime)
+      // Checked asynchronously: hundreds of these arrive at once as the grid
+      // scrolls, and a synchronous stat each on a USB disk froze the window.
+      // The protocol handler answers 404 if the file is still missing.
+      if (!(await fileExists(p))) await this.renderNow(v, shown.sha256, abs(shown.path), shown.mime)
       if (this.privateItem(v, assetKey!)) return null
-      return fs.existsSync(p) ? { path: p, mime: 'image/webp' } : null
+      return { path: p, mime: 'image/webp' }
     }
     if (what === 'motion') {
       const m = files.find((f) => f.role === 'motion')
@@ -986,14 +1069,22 @@ export class GalleryService {
 
   private renderNow(v: VaultEntry, sha: string, file: string, mime: string): Promise<void> {
     const renderingKey = `${v.id}:${sha}`
+    if (this.renderFailed.has(renderingKey)) return Promise.resolve()
     let p = this.rendering.get(renderingKey)
     if (!p) {
-      p = renderThumbnails(file, mime, sha, v.vault.layout.cache, { heic: this.heic })
+      // In the thumbnail process when there is one, like the background jobs:
+      // a file that crashes the decoder while the grid scrolls must not take
+      // the whole app with it, and the decode stays off this process.
+      const host = this.renderHost
+      const rendered = host
+        ? host.render({ file, mime, sha256: sha, cacheRoot: v.vault.layout.cache })
+        : renderThumbnails(file, mime, sha, v.vault.layout.cache, { heic: this.heic })
+      p = rendered
         .then(() => {
           const visible = v.vault.db.prepare(`SELECT 1 FROM file f JOIN asset a ON a.id=f.asset_id WHERE f.sha256=? AND a.hidden=0 AND a.deleted_at IS NULL AND f.encrypted_path IS NULL LIMIT 1`).get(sha)
           if (!visible) for (const size of Object.keys(SIZES) as ThumbSize[]) fs.rmSync(thumbPath(v.vault.layout.cache,sha,size),{force:true})
         })
-        .catch(() => undefined)
+        .catch(() => { this.renderFailed.add(renderingKey) })
         .finally(() => this.rendering.delete(renderingKey))
       this.rendering.set(renderingKey, p)
     }
@@ -1145,10 +1236,11 @@ export class GalleryService {
           cancelled: true,
         }
       } else {
-        this.save = { status: 'error', target: name, error: (e as Error).message }
+        this.save = { status: 'error', target: name, error: await this.saveError(target, e) }
       }
+      if (!this.vaults.has(target.id)) this.save = { status: 'error', target: name, error: await this.saveError(target, e) }
     } finally {
-      target.vault.db.pragma(`synchronous = ${previousSync}`)
+      try { target.vault.db.pragma(`synchronous = ${previousSync}`) } catch { /* its drive is gone */ }
       this.savingVaults.delete(target.id)
       this.changed(target)
       this.saveAbort = null
@@ -1261,21 +1353,24 @@ export class GalleryService {
       generation: 0,
     }
     entry.queue.retryFailed(THUMBNAIL)
+    retryMissingThumbnailJobs(vault.db)
     this.vaults.set(id, entry)
+    this.offline.delete(vault.layout.root)
     // Finish anything a crash interrupted, then protect whatever is hidden or
     // deleted and isn't yet (an item hidden before protection was set up).
-    try {
-      const swept = sweepPrivate(vault)
-      if (swept.missing.length) console.warn(`vault ${vault.manifest.name}: encrypted copies missing for ${swept.missing.join(', ')}`)
-    } catch (e) {
-      console.warn('private sweep:', (e as Error).message)
-    }
+    // In the background: opening the vault doesn't wait on a disk walk.
+    void sweepPrivate(vault)
+      .then((swept) => {
+        if (swept.missing.length) console.warn(`vault ${vault.manifest.name}: encrypted copies missing for ${swept.missing.join(', ')}`)
+      }, (e) => console.warn('private sweep:', (e as Error).message))
     void this.applyPrivacy(entry).catch(e => console.warn('Vault protection:', (e as Error).message))
     this.backfillPlaces()
     return entry
   }
 
   private readonly privateForgotten = new WeakSet<PhoneSession>()
+  /** Vaults whose thumbnail cache was checked for missing files this session. */
+  private readonly thumbCacheChecked = new WeakSet<OpenVault>()
 
   /** Once per phone session: remove cached copies of its Hidden and Recently Deleted items. */
   private forgetPhonePrivate() {
@@ -1366,6 +1461,8 @@ export class GalleryService {
       this.publish(true)
       return
     }
+    // Hidden and deleted items are encrypted in a vault, which needs its passcode set up.
+    if (!target.keyFile && this.anyPrivate(req)) throw new Error(needsProtectionIn(target.id, target.vault.manifest.name))
 
     const name = target.vault.manifest.name
     this.savingVaults.add(target.id)
@@ -1416,8 +1513,11 @@ export class GalleryService {
           this.publish()
         },
       })
-      // A replaced hidden item stays hidden; its new copy is encrypted like the old one was.
-      if (result.replaced) await this.applyPrivacy(target).catch((e) => console.warn('privacy after replace:', (e as Error).message))
+      // Hidden or deleted at the source, or a replaced hidden item: encrypt the
+      // new copies now. Before any iPhone cleanup, which keeps such items on the phone.
+      if (result.replaced || items.some((i) => i.hidden || i.deletedAt != null)) {
+        await this.applyPrivacy(target).catch((e) => console.warn('privacy after save:', (e as Error).message))
+      }
       let cleanup: Extract<SaveState,{status:'done'}>['cleanup']
       if (req.deleteAfterSave && phoneSession && device) {
         const session = phoneSession
@@ -1457,10 +1557,11 @@ export class GalleryService {
           cancelled: true,
         }
       } else {
-        this.save = { status: 'error', target: name, error: (e as Error).message }
+        this.save = { status: 'error', target: name, error: await this.saveError(target, e) }
       }
+      if (!this.vaults.has(target.id)) this.save = { status: 'error', target: name, error: await this.saveError(target, e) }
     } finally {
-      target.vault.db.pragma(`synchronous = ${previousSync}`)
+      try { target.vault.db.pragma(`synchronous = ${previousSync}`) } catch { /* its drive is gone */ }
       this.savingVaults.delete(target.id)
       this.savingVaults.delete(req.source)
       target.revision++
@@ -1470,6 +1571,17 @@ export class GalleryService {
       this.publish(true)
     }
     void this.runThumbnails()
+  }
+
+  /** Whether any of the items to save is hidden or deleted at its source. */
+  private anyPrivate(req: SaveRequest): boolean {
+    const fromVault = this.vaults.get(req.source)
+    if (fromVault) {
+      const row = fromVault.vault.db.prepare(`SELECT 1 FROM asset WHERE id = ? AND (hidden = 1 OR deleted_at IS NOT NULL)`)
+      return req.keys.some((k) => row.get(Number(k)) !== undefined)
+    }
+    const s = this.phone(req.source)
+    return req.keys.some((k) => s.privacyOf(k) !== null)
   }
 
   cancelSave() {
@@ -1583,7 +1695,11 @@ export class GalleryService {
       return n
     }
     await this.release(v, keys.map(Number).filter((id) => !this.flag(v, id, 'deleted')))
-    return this.setFlag(source, keys, 'hidden', false)
+    const n = this.setFlag(source, keys, 'hidden', false)
+    // Back in the library: out of any folder in Hidden, so hiding it again starts in Hidden itself.
+    const clear = this.vaults.get(source)!.vault.db.prepare('UPDATE asset SET hidden_folder_id = NULL WHERE id = ?')
+    for (const k of keys) clear.run(Number(k))
+    return n
   }
 
   /* ------------------------------------------------------------ protection */
@@ -1606,6 +1722,61 @@ export class GalleryService {
     v.privateKey = unlockVaultKey(v.keyFile, secret)
     this.changed(v)
     await this.applyPrivacy(v)
+  }
+
+  /* --------------------------------------------------- folders in Hidden */
+
+  /** A vault whose Hidden is open, for changing its folders. */
+  private unlockedForFolders(source: SourceId): VaultEntry {
+    const v = this.editable(source)
+    if (!v.keyFile) throw new Error(NEEDS_PROTECTION)
+    if (!v.privateKey) throw new Error('Unlock Hidden first.')
+    return v
+  }
+
+  async createHiddenFolder(source: SourceId, name: string): Promise<string> {
+    const v = this.unlockedForFolders(source)
+    const clean = folderName(name)
+    const db = v.vault.db
+    if (db.prepare('SELECT 1 FROM hidden_folder WHERE lower(name) = lower(?)').get(clean)) throw new Error(`There is already a folder called “${clean}” in Hidden.`)
+    const position = (db.prepare('SELECT COALESCE(MAX(position), -1) + 1 AS p FROM hidden_folder').get() as { p: number }).p
+    const id = Number(db.prepare('INSERT INTO hidden_folder (name, position, created_at) VALUES (?, ?, ?)').run(clean, position, Date.now()).lastInsertRowid)
+    this.changed(v)
+    return `hidden:${id}`
+  }
+
+  async renameHiddenFolder(source: SourceId, folder: string, name: string): Promise<void> {
+    const v = this.unlockedForFolders(source)
+    const id = folderId(folder)
+    const clean = folderName(name)
+    const db = v.vault.db
+    if (db.prepare('SELECT 1 FROM hidden_folder WHERE lower(name) = lower(?) AND id <> ?').get(clean, id)) throw new Error(`There is already a folder called “${clean}” in Hidden.`)
+    if (!db.prepare('UPDATE hidden_folder SET name = ? WHERE id = ?').run(clean, id).changes) throw new Error('That folder is gone.')
+    this.changed(v)
+  }
+
+  /** The folder goes; what was in it stays in Hidden. */
+  async deleteHiddenFolder(source: SourceId, folder: string): Promise<void> {
+    const v = this.unlockedForFolders(source)
+    const id = folderId(folder)
+    v.vault.db.transaction(() => {
+      v.vault.db.prepare('UPDATE asset SET hidden_folder_id = NULL WHERE hidden_folder_id = ?').run(id)
+      v.vault.db.prepare('DELETE FROM hidden_folder WHERE id = ?').run(id)
+    })()
+    this.changed(v)
+  }
+
+  /** Hidden items into a folder in Hidden, or (folder null) out of any folder. */
+  async moveToHiddenFolder(source: SourceId, keys: string[], folder: string | null): Promise<number> {
+    const v = this.unlockedForFolders(source)
+    const id = folder === null ? null : folderId(folder)
+    const db = v.vault.db
+    if (id !== null && !db.prepare('SELECT 1 FROM hidden_folder WHERE id = ?').get(id)) throw new Error('That folder is gone.')
+    const move = db.prepare('UPDATE asset SET hidden_folder_id = ?, updated_at = ? WHERE id = ? AND hidden = 1 AND deleted_at IS NULL')
+    let n = 0
+    db.transaction(() => { for (const k of keys) n += move.run(id, Date.now(), Number(k)).changes })()
+    this.changed(v)
+    return n
   }
 
   lockVault(id: SourceId) {
@@ -1655,12 +1826,31 @@ export class GalleryService {
   private applyPrivacy(v: VaultEntry): Promise<void> {
     v.privacy = v.privacy.catch(() => {}).then(async () => {
       if (!v.keyFile || !this.vaults.has(v.id)) return
+      this.privacyRunning++
+      try {
+        await this.applyPrivacyNow(v)
+      } finally {
+        this.privacyRunning--
+      }
+    })
+    return v.privacy
+  }
+
+  private async applyPrivacyNow(v: VaultEntry): Promise<void> {
+    if (!v.keyFile) return
+    {
       const work = privacyWork(v.vault.db)
+      // Hide and Delete already do this; items made private any other way
+      // (hidden before a passcode existed, say) must not keep their text,
+      // vectors or face crops in the clear either.
+      if (work.protect.length) this.forgetSearchData(v, work.protect)
       const pub = publicKeyOf(v.keyFile)
       let changed = false
+      let released = false
       const errors: string[] = []
       v.privacyError = null
       for (const id of work.protect) {
+        if (!this.vaults.has(v.id)) return // its drive was unplugged
         try {
           await protectAsset(v.vault, id, pub)
           changed = true
@@ -1670,8 +1860,13 @@ export class GalleryService {
       }
       if (v.privateKey) {
         for (const id of work.release) {
+          if (!this.vaults.has(v.id) || !v.privateKey) return
           try {
             await releaseAsset(v.vault, id, v.privateKey)
+            // Its thumbnails were removed when it was hidden: make them again,
+            // for the grid and for search to read.
+            v.queue.enqueue(THUMBNAIL, id)
+            released = true
             changed = true
           } catch (e) {
             errors.push(`Could not restore item ${id}: ${(e as Error).message}`)
@@ -1681,11 +1876,11 @@ export class GalleryService {
       if (v.privateKey) {
         try { await finishPrivateCleanup(v.vault, v.privateKey) } catch (e) { errors.push((e as Error).message) }
       }
+      if (released) void this.runThumbnails()
       v.privacyError = errors.length ? errors.join(' ') : null
       if (changed) this.changed(v)
       if (errors.length) { this.changed(v); throw new Error(v.privacyError!) }
-    })
-    return v.privacy
+    }
   }
 
   async setFavourite(source: SourceId, keys: string[], favourite: boolean): Promise<number> {
@@ -1983,7 +2178,7 @@ export class GalleryService {
           if (job?.kind === 'faces' && ++faced % 250 === 0) void this.settle(v)
         }
         progress()
-        const done = runSearchJobs(v.vault.db, v.queue, v.vault.layout.cache, stages, { signal: abort.signal, onSettled: progress, rest: () => this.rest() })
+        const done = runSearchJobs(v.vault.db, v.queue, v.vault.layout.cache, stages, { signal: abort.signal, onSettled: progress, rest: () => this.rest(), yieldTo: () => this.yieldTo() })
         this.searchDrain = { vault: v.id, abort, done }
         try {
           await done
@@ -2024,6 +2219,7 @@ export class GalleryService {
       signal: abort.signal,
       onSettled: progress,
       rest: () => this.rest(),
+      yieldTo: () => this.yieldTo(),
     })
     this.searchDrain = { vault: v.id, abort, done }
     try {
@@ -2040,12 +2236,20 @@ export class GalleryService {
     this.thumbsRunning = true
     try {
       for (; !this.stopping;) {
-        const pending = [...this.vaults.values()].filter((v) => {
-          if (this.closingVaults.has(v.id)) return false
+        const pending: VaultEntry[] = []
+        for (const v of [...this.vaults.values()]) {
+          if (this.closingVaults.has(v.id)) continue
           v.queue.recover(THUMBNAIL)
-          queueThumbnails(v.vault.db, v.queue, v.vault.layout.cache)
-          return v.queue.counts(THUMBNAIL).queued > 0
-        })
+          v.queue.enqueueAll(THUMBNAIL)
+          // Thumbnails deleted from the cache: checked once per vault per
+          // session, in batches, not on every pass (see requeueMissingThumbnails).
+          if (!this.thumbCacheChecked.has(v.vault)) {
+            this.thumbCacheChecked.add(v.vault)
+            await requeueMissingThumbnails(v.vault.db, v.queue, v.vault.layout.cache)
+            if (!this.vaults.has(v.id)) continue
+          }
+          if (v.queue.counts(THUMBNAIL).queued > 0) pending.push(v)
+        }
         if (!pending.length) break
         for (const v of pending) {
           if (!this.vaults.has(v.id) || this.closingVaults.has(v.id)) continue
@@ -2055,10 +2259,13 @@ export class GalleryService {
           this.thumbs = { done: base, total }
           this.publish()
           const abort = new AbortController()
-          const done = runThumbnails(v.vault.db, v.queue, v.vault.layout.media, v.vault.layout.cache, { heic: this.heic }, {
+          const host = this.renderHost
+          const done = runThumbnails(v.vault.db, v.queue, v.vault.layout.media, v.vault.layout.cache,
+            { heic: this.heic, render: host ? (r) => host.render(r) : undefined }, {
             concurrency: this.heic.size + 1,
             signal: abort.signal,
             rest: () => this.rest(),
+            yieldTo: () => this.yieldTo(),
             onSettled: () => {
               if (!this.vaults.has(v.id)) return
               this.thumbs = { done: v.queue.counts(THUMBNAIL).done, total }
@@ -2082,23 +2289,103 @@ export class GalleryService {
     }
   }
 
-  private loadVaultList(): string[] {
+  /**
+   * Every vault to open, including ones on drives that aren't plugged in
+   * now. They used to be dropped here, and the next save of the list forgot
+   * them: starting Theia without the drive lost the vault from the sidebar.
+   */
+  private loadVaultList(): { root: string; name?: string }[] {
     try {
-      const s = JSON.parse(fs.readFileSync(this.settingsPath(), 'utf8')) as { vaults?: string[] }
-      if (Array.isArray(s.vaults)) return s.vaults.filter((p) => fs.existsSync(p))
+      const s = JSON.parse(fs.readFileSync(this.settingsPath(), 'utf8')) as { vaults?: string[]; names?: Record<string, string> }
+      if (Array.isArray(s.vaults)) return s.vaults.filter((p) => typeof p === 'string').map((root) => ({ root, name: s.names?.[root] }))
     } catch {
       /* first run */
     }
     // First run: open the library the import made, if there is one.
-    return isVault(DEFAULT_LIBRARY) ? [DEFAULT_LIBRARY] : []
+    return isVault(DEFAULT_LIBRARY) ? [{ root: DEFAULT_LIBRARY }] : []
   }
 
   private saveVaultList() {
+    const names: Record<string, string> = {}
+    for (const v of this.vaults.values()) names[v.vault.layout.root] = v.vault.manifest.name
+    for (const o of this.offline.values()) names[o.root] ??= o.name
     fs.mkdirSync(this.deps.userData, { recursive: true })
-    fs.writeFileSync(
-      this.settingsPath(),
-      JSON.stringify({ vaults: [...this.vaults.values()].map((v) => v.vault.layout.root) }, null, 2),
-    )
+    // Atomically: a crash or a full disk mid-write must not lose the list.
+    const file = this.settingsPath()
+    const tmp = `${file}.tmp`
+    fs.writeFileSync(tmp, JSON.stringify({ vaults: Object.keys(names), names }, null, 2))
+    fs.renameSync(tmp, file)
+  }
+
+  /* ---------------------------------------------------------------- drives */
+
+  /**
+   * Notice drives unplugged or plugged back in. Every few seconds, and at
+   * once on any error that may mean one: a vault whose folder can no longer be
+   * reached is closed cleanly (its background work stopped, its database
+   * closed) instead of every timer and query failing on it with SQLite
+   * errors, which is what brought the whole app down.
+   */
+  checkDrives(): Promise<void> {
+    if (this.stopping) return Promise.resolve()
+    if (this.drivesChecking) return this.drivesChecking
+    this.drivesChecking = (async () => {
+      for (const v of [...this.vaults.values()]) {
+        if ((await reachable(path.join(v.vault.layout.root, '.vault'))) === false) this.disconnectVault(v)
+      }
+      for (const o of [...this.offline.values()]) {
+        if (this.stopping) return
+        if ((await reachable(o.root)) === true && isVault(o.root)) this.reconnectVault(o)
+      }
+    })()
+      .catch((e) => console.warn('drive check:', (e as Error).message))
+      .finally(() => { this.drivesChecking = null })
+    return this.drivesChecking
+  }
+
+  private disconnectVault(v: VaultEntry) {
+    if (this.vaults.get(v.id) !== v) return
+    const root = v.vault.layout.root
+    const name = v.vault.manifest.name
+    console.warn(`vault ${name}: ${root} can't be reached; closed until its drive is back`)
+    // First, so nothing else starts on it.
+    this.vaults.delete(v.id)
+    this.offline.set(root, { root, name })
+    this.thumbDrains.get(v.id)?.abort.abort()
+    if (this.searchDrain?.vault === v.id) this.searchDrain.abort.abort()
+    if (this.savingVaults.has(v.id)) this.saveAbort?.abort()
+    v.privateKey = null
+    v.generation++
+    for (const k of [...this.privateCache.keys()]) if (k.startsWith(`${v.id}|`)) this.privateCache.delete(k)
+    try { v.vault.db.close() } catch { /* the file is already gone */ }
+    this.publish(true)
+  }
+
+  private reconnectVault(o: OfflineVaultInfo) {
+    try {
+      const entry = this.addVault(o.root)
+      this.offline.delete(o.root)
+      console.warn(`vault ${entry.vault.manifest.name}: its drive is back`)
+      this.publish(true)
+      void this.runThumbnails()
+    } catch (e) {
+      // Still mounting, or busy: the next check tries again.
+      console.warn(`vault ${o.root} is back but can't be opened yet:`, (e as Error).message)
+    }
+  }
+
+  /** Stop offering a vault whose drive is gone for good. Its files are not touched. */
+  forgetVault(root: string) {
+    if (!this.offline.delete(root)) return
+    this.saveVaultList()
+    this.publish(true)
+  }
+
+  /** What went wrong with a save, said plainly when the vault's drive was unplugged during it. */
+  private async saveError(target: VaultEntry, e: unknown): Promise<string> {
+    await this.checkDrives()
+    if (this.vaults.has(target.id)) return (e as Error).message
+    return `The drive with “${target.vault.manifest.name}” was disconnected during the save. What was saved before then is in the vault (the last few items may need saving again), and no originals were deleted. Plug the drive back in and save again to finish.`
   }
 
   private settingsPath() {
@@ -2118,6 +2405,45 @@ export class GalleryService {
       this.deps.publish(this.snapshot())
     }, 150)
   }
+}
+
+const DRIVE_CHECK_MS = 3000
+
+/** A folder name from the window: trimmed, not empty, not absurdly long. */
+function folderName(name: unknown): string {
+  const clean = typeof name === 'string' ? name.replace(/\s+/g, ' ').trim() : ''
+  if (!clean) throw new Error('Give the folder a name.')
+  if (clean.length > 80) throw new Error('Use a shorter name (80 characters at most).')
+  return clean
+}
+
+function folderId(folder: unknown): number {
+  const m = typeof folder === 'string' ? /^hidden:(\d+)$/.exec(folder) : null
+  if (!m) throw new Error('That is not a folder in Hidden.')
+  return Number(m[1])
+}
+
+/** Whether the drive a folder is on is plugged in (its root exists), as against the folder being gone. */
+function driveThere(folder: string): boolean {
+  return fs.existsSync(path.parse(path.resolve(folder)).root)
+}
+
+/**
+ * Whether a path can be reached. Null when it doesn't answer within a few
+ * seconds: a sleeping hard drive spinning up is slow, not unplugged.
+ */
+function reachable(file: string, ms = 5000): Promise<boolean | null> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), ms)
+    fs.promises.access(file).then(
+      () => { clearTimeout(timer); resolve(true) },
+      () => { clearTimeout(timer); resolve(false) },
+    )
+  })
+}
+
+function fileExists(file: string): Promise<boolean> {
+  return fs.promises.access(file).then(() => true, () => false)
 }
 
 function safeName(name: string): string {

@@ -167,53 +167,87 @@ function buildHeader(ephemeralDer: Buffer, chunk: number, size: number): Buffer 
  */
 export async function encryptFile(src: string, dst: string, vaultPublic: KeyObject, chunk = CHUNK): Promise<{ size: number; sha256: string }> {
   if (!Number.isSafeInteger(chunk) || chunk < 1 || chunk > 16 * CHUNK) throw new Error('Invalid encryption chunk size.')
-  if (fs.existsSync(dst)) throw new Error('The encrypted destination already exists; nothing was overwritten.')
-  const size = fs.statSync(src).size
-  const eph = crypto.generateKeyPairSync('x25519')
-  const ephDer = eph.publicKey.export({ format: 'der', type: 'spki' })
-  const key = contentKey(crypto.diffieHellman({ privateKey: eph.privateKey, publicKey: vaultPublic }), ephDer)
-  const header = buildHeader(ephDer, chunk, size)
-  const chunks = Math.max(1, Math.ceil(size / chunk))
-  const hash = crypto.createHash('sha256')
+  if (await exists(dst)) throw new Error('The encrypted destination already exists; nothing was overwritten.')
+  // All file work here is asynchronous. This runs in Electron's main process,
+  // and hiding a big video with synchronous reads, writes and fsync froze the
+  // window for the whole of it (measured 0.7 s per 300 MB on an SSD, several
+  // times that on a USB hard drive).
+  const inFh = await fs.promises.open(src, 'r')
+  let outFh: fs.promises.FileHandle | null = null
   const tmp = `${dst}.${crypto.randomUUID()}.tmp`
-  const inFd = fs.openSync(src, 'r')
-  let outFd: number
-  try { outFd = fs.openSync(tmp, 'wx') }
-  catch (e) { fs.closeSync(inFd); throw e }
+  let key: Buffer
+  let size: number
+  const hash = crypto.createHash('sha256')
   try {
-    fs.writeSync(outFd, header)
-    const buf = Buffer.alloc(chunk)
-    for (let i = 0; i < chunks; i++) {
-      const n = fs.readSync(inFd, buf, 0, chunk, i * chunk)
-      const plain = buf.subarray(0, n)
-      hash.update(plain)
-      const c = crypto.createCipheriv('aes-256-gcm', key, nonce(i))
-      c.setAAD(aad(header, i, i === chunks - 1))
-      fs.writeSync(outFd, Buffer.concat([c.update(plain), c.final(), c.getAuthTag()]))
-      if (i % 16 === 15) await new Promise<void>((r) => setImmediate(r)) // stay responsive on big videos
-    }
-    fs.fsyncSync(outFd)
-  } catch (e) {
-    fs.closeSync(outFd)
-    fs.rmSync(tmp, { force: true })
-    throw e
-  } finally {
-    fs.closeSync(inFd)
+    size = (await inFh.stat()).size
+    const eph = crypto.generateKeyPairSync('x25519')
+    const ephDer = eph.publicKey.export({ format: 'der', type: 'spki' })
+    key = contentKey(crypto.diffieHellman({ privateKey: eph.privateKey, publicKey: vaultPublic }), ephDer)
+    const header = buildHeader(ephDer, chunk, size)
+    const chunks = Math.max(1, Math.ceil(size / chunk))
+    outFh = await fs.promises.open(tmp, 'wx')
     try {
-      fs.closeSync(outFd)
-    } catch {
-      /* already closed above */
+      await writeAll(outFh, header)
+      const buf = Buffer.alloc(chunk)
+      for (let i = 0; i < chunks; i++) {
+        const want = Math.min(chunk, size - i * chunk)
+        const n = await readFully(inFh, buf, want, i * chunk)
+        if (n !== want) throw new Error('The file changed size while it was being encrypted; nothing was changed.')
+        const plain = buf.subarray(0, n)
+        hash.update(plain)
+        const c = crypto.createCipheriv('aes-256-gcm', key, nonce(i))
+        c.setAAD(aad(header, i, i === chunks - 1))
+        await writeAll(outFh, Buffer.concat([c.update(plain), c.final(), c.getAuthTag()]))
+      }
+      await outFh.sync()
+    } catch (e) {
+      await outFh.close().catch(() => {})
+      outFh = null
+      await fs.promises.rm(tmp, { force: true })
+      throw e
     }
+  } finally {
+    await inFh.close().catch(() => {})
+    await outFh?.close().catch(() => {})
   }
   const sha256 = hash.digest('hex')
   // Read it back before anyone relies on it. Only the public key is around
   // while hiding, so check with this file's own key instead of the vault's.
-  if ((await shaWithKey(tmp, key)) !== sha256) {
-    fs.rmSync(tmp, { force: true })
+  // A failure to read it back (a USB drive unplugged, say) also removes it.
+  const readBack = await shaWithKey(tmp, key).catch(async (e: unknown) => {
+    await fs.promises.rm(tmp, { force: true })
+    throw e
+  })
+  if (readBack !== sha256) {
+    await fs.promises.rm(tmp, { force: true })
     throw new Error('the encrypted copy did not read back the same; nothing was changed')
   }
-  publishWithoutReplacing(tmp, dst)
+  await publishWithoutReplacing(tmp, dst)
   return { size, sha256 }
+}
+
+function exists(file: string): Promise<boolean> {
+  return fs.promises.access(file).then(() => true, () => false)
+}
+
+/** `length` bytes at `position`, or fewer only at the end of the file. */
+async function readFully(fh: fs.promises.FileHandle, buf: Buffer, length: number, position: number): Promise<number> {
+  let done = 0
+  while (done < length) {
+    const { bytesRead } = await fh.read(buf, done, length - done, position + done)
+    if (!bytesRead) break
+    done += bytesRead
+  }
+  return done
+}
+
+async function writeAll(fh: fs.promises.FileHandle, bytes: Buffer): Promise<void> {
+  for (let off = 0; off < bytes.length; ) off += (await fh.write(bytes, off, bytes.length - off)).bytesWritten
+}
+
+/** fs.read on a plain descriptor, as a promise: the reader's chunk reads stay off the main thread. */
+function readAt(fd: number, buf: Buffer, length: number, position: number): Promise<number> {
+  return new Promise((resolve, reject) => fs.read(fd, buf, 0, length, position, (e, n) => (e ? reject(e) : resolve(n))))
 }
 
 /** An encrypted file opened for reading: any range, decrypting only the chunks it covers. */
@@ -260,10 +294,8 @@ function openWith(blob: string, keyFor: (ephemeralDer: Buffer) => Buffer): Encry
     if (fs.fstatSync(fd).size !== expected) throw new Error('encrypted file is the wrong length (cut off or padded)')
     const key = keyFor(Buffer.from(ephDer))
 
-    const chunkPlain = (i: number): Buffer => {
-      const plainLen = i === chunks - 1 ? size - i * chunk : chunk
-      const sealed = Buffer.alloc(plainLen + TAG)
-      if (fs.readSync(fd, sealed, 0, sealed.length, header.length + i * (chunk + TAG)) !== sealed.length) throw new Error('Encrypted content was cut off while reading.')
+    const open = (i: number, sealed: Buffer): Buffer => {
+      const plainLen = sealed.length - TAG
       const d = crypto.createDecipheriv('aes-256-gcm', key, nonce(i))
       d.setAAD(aad(header, i, i === chunks - 1))
       d.setAuthTag(sealed.subarray(plainLen))
@@ -274,9 +306,36 @@ function openWith(blob: string, keyFor: (ephemeralDer: Buffer) => Buffer): Encry
       }
     }
 
+    const sealedLength = (i: number) => (i === chunks - 1 ? size - i * chunk : chunk) + TAG
     // Empty files still carry an authentication tag. It must not be skipped.
-    if (size === 0) chunkPlain(0)
+    if (size === 0) {
+      const sealed = Buffer.alloc(TAG)
+      if (fs.readSync(fd, sealed, 0, TAG, header.length) !== TAG) throw new Error('Encrypted content was cut off while reading.')
+      open(0, sealed)
+    }
+    // Chunks are read asynchronously, so playing a hidden video or checking a
+    // big file doesn't hold the main thread. The descriptor closes only once
+    // no read is using it: closing under a pending read could let the number
+    // be reused by another file and read from that instead.
     let closed = false
+    let pending = 0
+    const release = () => {
+      if (closed && pending === 0) {
+        key.fill(0)
+        fs.close(fd, () => {})
+      }
+    }
+    const chunkPlain = async (i: number): Promise<Buffer> => {
+      const sealed = Buffer.alloc(sealedLength(i))
+      let n = 0
+      while (n < sealed.length) {
+        const got = await readAt(fd, sealed.subarray(n), sealed.length - n, header.length + i * (chunk + TAG) + n)
+        if (!got) break
+        n += got
+      }
+      if (n !== sealed.length) throw new Error('Encrypted content was cut off while reading.')
+      return open(i, sealed)
+    }
     return {
       size,
       async read(start, length) {
@@ -284,16 +343,27 @@ function openWith(blob: string, keyFor: (ephemeralDer: Buffer) => Buffer): Encry
         if (!Number.isSafeInteger(start) || !Number.isSafeInteger(length) || start < 0 || length < 0) throw new Error('Invalid encrypted read range.')
         const end = Math.min(size, start + length)
         if (start >= end) return Buffer.alloc(0)
-        const parts: Buffer[] = []
-        for (let i = Math.floor(start / chunk); i * chunk < end; i++) {
-          const p = chunkPlain(i)
-          const from = Math.max(0, start - i * chunk)
-          const to = Math.min(p.length, end - i * chunk)
-          parts.push(p.subarray(from, to))
+        pending++
+        try {
+          const parts: Buffer[] = []
+          for (let i = Math.floor(start / chunk); i * chunk < end; i++) {
+            if (closed) throw new Error('Encrypted reader is closed.')
+            const p = await chunkPlain(i)
+            const from = Math.max(0, start - i * chunk)
+            const to = Math.min(p.length, end - i * chunk)
+            parts.push(p.subarray(from, to))
+          }
+          return Buffer.concat(parts)
+        } finally {
+          pending--
+          release()
         }
-        return Buffer.concat(parts)
       },
-      close: () => { if (!closed) { closed = true; key.fill(0); fs.closeSync(fd) } },
+      close: () => {
+        if (closed) return
+        closed = true
+        release()
+      },
     }
   } catch (e) {
     fs.closeSync(fd)
@@ -303,44 +373,44 @@ function openWith(blob: string, keyFor: (ephemeralDer: Buffer) => Buffer): Encry
 
 /** Decrypt a whole blob to `dst` (temporary name, then renamed). Returns the plaintext SHA-256. */
 export async function decryptFile(blob: string, dst: string, vaultPrivate: KeyObject): Promise<string> {
-  if (fs.existsSync(dst)) throw new Error('The restore destination already exists; nothing was overwritten.')
+  if (await exists(dst)) throw new Error('The restore destination already exists; nothing was overwritten.')
   const r = openEncrypted(blob, vaultPrivate)
   const tmp = `${dst}.${crypto.randomUUID()}.tmp`
   const hash = crypto.createHash('sha256')
-  let fd: number
-  try { fd = fs.openSync(tmp, 'wx') }
+  let fh: fs.promises.FileHandle
+  try { fh = await fs.promises.open(tmp, 'wx') }
   catch (e) { r.close(); throw e }
   try {
-    for (let pos = 0; pos < r.size || pos === 0; pos += CHUNK) {
+    for (let pos = 0; pos < r.size; pos += CHUNK) {
       const b = await r.read(pos, CHUNK)
       hash.update(b)
-      fs.writeSync(fd, b)
-      if (r.size === 0) break
+      await writeAll(fh, b)
     }
-    fs.fsyncSync(fd)
+    await fh.sync()
   } catch (e) {
-    fs.closeSync(fd)
-    fs.rmSync(tmp, { force: true })
+    await fh.close().catch(() => {})
+    await fs.promises.rm(tmp, { force: true })
     r.close()
     throw e
   }
-  fs.closeSync(fd)
+  await fh.close()
   r.close()
-  publishWithoutReplacing(tmp, dst)
+  await publishWithoutReplacing(tmp, dst)
   return hash.digest('hex')
 }
 
 /** An exclusive publication prevents a late-created unrelated file being overwritten. */
-function publishWithoutReplacing(tmp: string, dst: string): void {
+async function publishWithoutReplacing(tmp: string, dst: string): Promise<void> {
   try {
-    try { fs.linkSync(tmp, dst) }
+    try { await fs.promises.link(tmp, dst) }
     catch (e) {
       if ((e as NodeJS.ErrnoException).code === 'EEXIST') throw e
-      fs.copyFileSync(tmp, dst, fs.constants.COPYFILE_EXCL)
+      // Drives without hard links (exFAT, FAT): a whole copy, so not on the main thread.
+      await fs.promises.copyFile(tmp, dst, fs.constants.COPYFILE_EXCL)
     }
-    const fd = fs.openSync(dst, 'r+')
-    try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
-  } finally { fs.rmSync(tmp, { force: true }) }
+    const fh = await fs.promises.open(dst, 'r+')
+    try { await fh.sync() } finally { await fh.close() }
+  } finally { await fs.promises.rm(tmp, { force: true }) }
 }
 
 /** Decrypt and hash without writing anything: proves a blob opens and holds those bytes. */

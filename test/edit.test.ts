@@ -48,6 +48,8 @@ describe('editing copies in a vault', () => {
     expect(items).toHaveLength(2)
     expect(items.find(a => a.key === copy)).toMatchObject({ edited: true, t: 1700000000000, w: 100, h: 300 })
     expect(v.db.prepare('SELECT parent_id FROM edit_copy WHERE asset_id = ?').get(copy)).toEqual({ parent_id: Number(key) })
+    // In the album's folder too, as File Explorer shows albums, not only in Theia.
+    expect(fs.existsSync(path.join(v.layout.root, 'Trip', path.basename(file.path)))).toBe(true)
     expect((await sharp(await editPreview({ file: path.join(v.layout.media, vaultFiles(v.db, key)[0]!.path), mime: 'image/jpeg' }, r, deps)).metadata()).height).toBe(300)
   })
 

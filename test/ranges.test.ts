@@ -29,6 +29,19 @@ describe('byte ranges for video seeking', () => {
     expect((await rangeResponse({ file: f }, 'bytes=300-', {})).status).toBe(416)
   })
 
+  it('answers a whole small file from one read, and a missing one with ENOENT for a 404', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rng-'))
+    const f = path.join(dir, 'thumb.webp')
+    const bytes = Buffer.from(Array.from({ length: 5000 }, (_, i) => i % 251))
+    fs.writeFileSync(f, bytes)
+    const r = await rangeResponse({ file: f }, null, { 'Content-Type': 'image/webp' })
+    expect(r.status).toBe(200)
+    expect(r.headers.get('content-length')).toBe('5000')
+    expect(r.headers.get('content-type')).toBe('image/webp')
+    expect(Buffer.from(await r.arrayBuffer()).equals(bytes)).toBe(true)
+    await expect(rangeResponse({ file: path.join(dir, 'gone.webp') }, null, {})).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   it('streams a range from a slow source, reading only as it is consumed', async () => {
     const size = SOURCE_CHUNK * 3 + 10
     const reads: [number, number][] = []

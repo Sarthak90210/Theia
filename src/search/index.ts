@@ -90,6 +90,24 @@ export function queueOcr(db: Db, queue: JobQueue): number {
 }
 
 /** Queue every stage that has a model. Returns how many jobs are waiting. */
+/** The error a search job waits on while its item has no thumbnail. */
+export const NO_THUMBNAIL = 'no thumbnail to read yet'
+
+/**
+ * Search jobs that gave up for want of a thumbnail (before that was a
+ * temporary condition): queued again. Repairs vaults where unhiding or
+ * restoring dropped items from search.
+ */
+export function retryMissingThumbnailJobs(db: Db): number {
+  const kinds = Object.values(STAGES).map((s) => s.kind)
+  return db
+    .prepare(
+      `UPDATE job SET state = 'queued', attempts = 0, last_error = NULL, not_before = 0, updated_at = ?
+        WHERE state = 'failed' AND last_error LIKE 'no thumbnail to read%' AND kind IN (${kinds.map(() => '?').join(', ')})`,
+    )
+    .run(Date.now(), ...kinds).changes
+}
+
 export function queueSearchJobs(db: Db, queue: JobQueue, stages: Stages): number {
   let waiting = 0
   for (const [name, s] of Object.entries(STAGES) as [StageName, Stage][]) {
@@ -138,7 +156,11 @@ function stageHandler<T>(db: Db, cacheRoot: string, sizes: ('sm' | 'lg')[], read
     if (!row) throw new PermanentJobError(`asset ${job.assetId} has no primary file`)
     if (isPrivate(row)) return
     const thumb = sizes.map((s) => thumbPath(cacheRoot, row.sha256, s)).find((p) => fs.existsSync(p))
-    if (!thumb) throw new PermanentJobError('no thumbnail to read')
+    // Not made yet, or removed while the item was hidden and not remade:
+    // tried again later (the thumbnail drain runs first), not given up on. A
+    // permanent failure here dropped unhidden and restored photos from search
+    // and People for good.
+    if (!thumb) throw new Error(NO_THUMBNAIL)
     const value = await read(thumb)
     // Hidden or deleted while the model was busy: keep nothing.
     if (isPrivate(primary.get(job.assetId) as Primary | undefined)) return

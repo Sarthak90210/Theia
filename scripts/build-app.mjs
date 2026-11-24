@@ -1,6 +1,7 @@
 // Bundle the Electron app into dist-app/.
 //
 //   main.cjs       main process: device, engine, database, jobs
+//   thumb-host.cjs the thumbnail process (sharp, ffmpeg, HEIC), so a decoder crash can't end the app
 //   preload.cjs    the window's only bridge to the main process
 //   renderer/      the window: index.html, styles.css, app.js
 //   heic-worker.mjs, embed-worker.mjs, ocr-worker.mjs, ocr-core.mjs,
@@ -52,6 +53,19 @@ await Promise.all([
     logLevel: 'warning',
     ...importMetaShim,
     define: { ...importMetaShim.define, THEIA_DEVELOPMENT: JSON.stringify(!release) },
+  }),
+  // The thumbnail process (src/thumbs/render-host.ts), started with utilityProcess.
+  build({
+    entryPoints: [path.join(root, 'src/thumbs/render-child.ts')],
+    outfile: path.join(out, 'thumb-host.cjs'),
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    target: 'node22',
+    external,
+    sourcemap: 'linked',
+    logLevel: 'warning',
+    ...importMetaShim,
   }),
   build({
     entryPoints: [path.join(root, 'app/preload/preload.ts')],

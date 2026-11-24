@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { mediaUrl, type GalleryItem, type SourceId } from '../shared/api.ts'
-import { clock } from './format.ts'
+import { clock, dayLabel, wall } from './format.ts'
 import * as I from './icons.tsx'
 import { TextMarks } from './TextMarks.tsx'
 import { layoutGrid, markAt, monthMarks, planTimeline, rowOf, SIDE, visibleRows, type MonthMark, type View } from './layout.ts'
@@ -35,6 +35,11 @@ export interface GridProps {
   onContextMenu?: (index: number, e: React.MouseEvent) => void
   /** A timeline of years and months beside the photos, to jump through time (items in capture order). */
   timeline?: boolean
+  /**
+   * Where a fresh list opens: at the end (the newest photos, like the phone's
+   * library) or at the top (search results, best match first).
+   */
+  startAt?: 'end' | 'top'
 }
 
 /** Room kept beside the tiles for the timeline. */
@@ -96,13 +101,16 @@ export function Grid(props: GridProps) {
     const key = scrollTo ?? anchor.current
     const index = key ? items.findIndex((it) => it.key === key) : -1
     const row = index >= 0 ? rowOf(layout.rows, index) : null
-    el.scrollTop = row ? Math.max(0, row.top - el.clientHeight / 3) : el.scrollHeight
+    el.scrollTop = row ? Math.max(0, row.top - el.clientHeight / 3) : props.startAt === 'top' ? 0 : el.scrollHeight
     setViewport({ top: el.scrollTop, height: el.clientHeight })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layout, scrollTo])
 
   const frame = useRef(0)
+  // A scroll frame still pending when the grid goes away is dropped.
+  useEffect(() => () => cancelAnimationFrame(frame.current), [])
   const onScroll = useCallback(() => {
+    markScrolling()
     if (frame.current) return
     frame.current = requestAnimationFrame(() => {
       frame.current = 0
@@ -191,14 +199,22 @@ export function Grid(props: GridProps) {
     props.onContextMenu(index, e)
   }
 
+  // Tiles get handlers that never change, which call the latest ones. A new
+  // function each render defeated Tile's memo: every scroll frame and every
+  // progress update from a save re-rendered every tile on screen.
+  const handlers = useRef({ click, menu })
+  handlers.current = { click, menu }
+  const onTileClick = useCallback((index: number, e: React.MouseEvent) => handlers.current.click(index, e), [])
+  const onTileMenu = useCallback((index: number, e: React.MouseEvent) => handlers.current.menu(index, e), [])
+
   return (
     <div className="grid-wrap">
-    <div className={`grid ${timeline ? 'with-timeline' : ''}`} ref={box} onScroll={onScroll} tabIndex={0} onKeyDown={onKeyDown} aria-label="Photos">
+    <div className={`grid ${timeline ? 'with-timeline' : ''}`} ref={box} onScroll={onScroll} tabIndex={0} onKeyDown={onKeyDown} aria-label="Photos" role="grid" aria-rowcount={layout.rows.length} aria-multiselectable={props.selecting || undefined}>
       <div className="grid-inner" style={{ height: layout.height }}>
         {rows.map((r) =>
           r.kind === 'header' ? (
-            <div key={`h${r.start}`} className={`grid-header ${view}`} style={{ top: r.top, height: r.height }}>
-              <span className="grid-title">{r.label}</span>
+            <div key={`h${r.start}`} className={`grid-header ${view}`} role="row" style={{ top: r.top, height: r.height }}>
+              <span className="grid-title" role="rowheader">{r.label}</span>
               <span className="grid-sub">{r.sub}</span>
               {view === 'days' && (
                 <button
@@ -213,7 +229,7 @@ export function Grid(props: GridProps) {
               )}
             </div>
           ) : (
-            <div key={`r${r.start}`} className="grid-row" style={{ top: r.top, height: r.height }}>
+            <div key={`r${r.start}`} className="grid-row" role="row" style={{ top: r.top, height: r.height }}>
               {items.slice(r.start, r.end).map((it, j) => (
                 <Tile
                   key={it.key}
@@ -227,8 +243,8 @@ export function Grid(props: GridProps) {
                   selecting={props.selecting && !overview}
                   focused={focusIndex === r.start + j}
                   badges={!overview}
-                  onClick={click}
-                  onMenu={menu}
+                  onClick={onTileClick}
+                  onMenu={onTileMenu}
                 />
               ))}
             </div>
@@ -251,6 +267,19 @@ export function Grid(props: GridProps) {
     )}
     </div>
   )
+}
+
+/**
+ * Background indexing holds off while the person scrolls (see `yieldTo` in
+ * src/jobs/queue.ts): with it running, scrolling dropped frames; without, none.
+ * Told at most every 300 ms; the app holds off 700 ms after the last word.
+ */
+let lastActive = 0
+function markScrolling() {
+  const now = performance.now()
+  if (now - lastActive < 300) return
+  lastActive = now
+  void window.photos?.userActive?.().catch(() => {})
 }
 
 const MONTH = new Intl.DateTimeFormat(undefined, { month: 'long', timeZone: 'UTC' })
@@ -356,6 +385,15 @@ interface TileProps {
 const LIVE_HOVER_MS = 250
 const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
+const KIND_NAMES: Record<GalleryItem['kind'], string> = { photo: 'Photo', video: 'Video', live: 'Live Photo', burst: 'Burst' }
+
+function tileLabel(item: GalleryItem): string {
+  const parts = [KIND_NAMES[item.kind] ?? 'Photo', dayLabel(wall(item.t, item.off))]
+  if (item.kind === 'video' && item.dur !== null) parts.push(clock(item.dur))
+  if (item.fav) parts.push('favourite')
+  return parts.join(', ')
+}
+
 const Tile = memo(function Tile({ source, item, index, size, left, thumb, selected, selecting, focused, badges, onClick, onMenu }: TileProps) {
   const [failed, setFailed] = useState(false)
   // A Live Photo plays its motion in place while the pointer rests on it,
@@ -382,6 +420,8 @@ const Tile = memo(function Tile({ source, item, index, size, left, thumb, select
       onPointerEnter={enter}
       onPointerLeave={leave}
       role="gridcell"
+      // A name for each tile, so a screen reader says more than "cell".
+      aria-label={tileLabel(item)}
       data-key={item.key}
       aria-selected={selected}
     >

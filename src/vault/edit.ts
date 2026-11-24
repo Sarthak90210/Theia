@@ -7,6 +7,7 @@ import { displayFile, vaultFiles } from '../gallery/vault-gallery.ts'
 import { editPhoto, editVideo, type EditDeps, type EditSource } from '../media/edit.ts'
 import { validateEdit, type EditRecipe } from '../media/edit-recipe.ts'
 import { probe } from '../media/playback.ts'
+import { linkIntoAlbumFolders } from './save.ts'
 
 export function vaultEditSource(v: OpenVault, key: string): EditSource {
   const a = v.db.prepare('SELECT deleted_at FROM asset WHERE id = ?').get(Number(key)) as { deleted_at: number | null } | undefined
@@ -49,7 +50,7 @@ export async function saveEditedCopy(v: OpenVault, key: string, settings: EditRe
     vaultEditSource(v, key)
     fs.renameSync(tmp, output)
     const now = Date.now()
-    return v.db.transaction(() => {
+    const id = v.db.transaction(() => {
       const id = Number(v.db.prepare(`INSERT INTO asset (kind, captured_utc, captured_offset, time_source, lat, lon, altitude, place_id,
         width, height, duration_ms, favourite, hidden, has_adjustments, created_at, updated_at)
         SELECT ?, captured_utc, captured_offset, time_source, lat, lon, altitude, place_id, ?, ?, ?, favourite, hidden, 1, ?, ? FROM asset WHERE id = ?`)
@@ -59,8 +60,13 @@ export async function saveEditedCopy(v: OpenVault, key: string, settings: EditRe
         .run(id, `${folder}/${name}`, fs.statSync(output).size, sha, video ? 'video/mp4' : 'image/jpeg', now, now)
       v.db.prepare('INSERT INTO edit_copy (asset_id, parent_id, recipe, created_at) VALUES (?, ?, ?, ?)').run(id, Number(key), JSON.stringify(r), now)
       v.db.prepare('INSERT INTO album_asset (album_id, asset_id, position) SELECT album_id, ?, position + 1 FROM album_asset WHERE asset_id = ?').run(id, Number(key))
-      return String(id)
+      return id
     })()
+    // In the albums' folders as well, as a save puts things, so File Explorer
+    // shows the album the way Theia does. A link that can't be made leaves
+    // the copy itself saved.
+    await linkIntoAlbumFolders(v.db, v.layout.media, id).catch((e) => console.warn('edited copy album link:', (e as Error).message))
+    return String(id)
   } catch (e) {
     for (const f of [tmp, output]) fs.rmSync(f, { force: true })
     throw e

@@ -187,5 +187,5 @@ export function cleanError(message: string): string {
   return message
     .replace(/^Error invoking remote method '[^']*':\s*/, '')
     .replace(/^(?:[A-Z][A-Za-z]*(?:Error|Secret|Vault|Cancelled)|Error):\s*/, '')
-    .replace(/^(?:LOCKED|PROTECTION_NEEDED):\s*/, '')
+    .replace(/^(?:LOCKED|PROTECTION_NEEDED)(?:\[[^\]]*\])?:\s*/, '')
 }

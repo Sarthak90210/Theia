@@ -174,8 +174,12 @@ h3 { text-transform: none; font-size: 12px; letter-spacing: 0; }
 
 @media (max-width: 1180px) {
   .toolbar { padding: 22px 22px 12px; gap: 10px; }
-  .toolbar .save-label { display: none; }
-  .toolbar .menu-anchor > button { width: 36px; padding: 8px; justify-content: center; }
+  /* Both menu buttons become icons (their aria-labels still name them): the
+     label of "Add photos…" used to stay and run into "Select". */
+  .toolbar .save-label, .toolbar .add-label { display: none; }
+  .toolbar .menu-anchor > button { width: 36px; padding: 8px; justify-content: center; gap: 0; font-size: 0; }
+  /* The icon keeps its size: the space beside the hidden label squeezed it to a dot. */
+  .toolbar .menu-anchor > button > svg { flex-shrink: 0; }
   .viewer-title > div:first-child { max-width: 140px; }
   .viewer-actions { gap: 4px; }
   .viewer-bar .save-label { display: none; }
@@ -288,6 +292,9 @@ h3 { text-transform: none; font-size: 12px; letter-spacing: 0; }
 
 /* A vault row: the vault itself, and a ⋯ button for its location and options. */
 .side-row { position: relative; }
+/* A vault whose drive is unplugged (Sidebar.tsx): listed, not openable. */
+.side-row.offline > .side-item { opacity: 0.5; cursor: default; }
+.side-row.offline > .side-item:hover { background: none; }
 .side-row > .side-item { padding-right: 38px; }
 .side-more {
   position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
@@ -328,7 +335,8 @@ h3 { text-transform: none; font-size: 12px; letter-spacing: 0; }
 .protect-check input { width: 17px; height: 17px; }
 .locked-collection .unlock-form { width: min(340px, 100%); display: grid; gap: 10px; text-align: left; margin-top: 4px; }
 .unlock-form { display: grid; gap: 10px; }
-.unlock-actions { display: flex; justify-content: space-between; align-items: center; }
+.unlock-actions { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.unlock-buttons { display: flex; gap: 8px; margin-left: auto; }
 .lock-button { gap: 6px; }
 
 /* Search: in the toolbar's second row, between the time tabs and the tile slider. */
@@ -471,3 +479,10 @@ form.person-title { max-width: 460px; }
 .welcome-dialog .preferences-head p { margin: 0; }
 .welcome-foot { display: flex; justify-content: flex-end; padding: 14px 20px 18px; border-top: 1px solid var(--line); }
 .setting-later { margin: 0; }
+
+/* Folders in Hidden (HiddenFolders.tsx): indented under Hidden, like the album they are sorted from. */
+.hidden-folders { display: grid; }
+.side-sub > .side-item, .side-item.side-sub { padding-left: 34px; }
+.side-folder-menu { right: 4px; top: calc(100% - 2px); min-width: 180px; z-index: 30; }
+.menu-item.danger { color: var(--bad); }
+.folder-name-dialog { width: min(420px, calc(100vw - 48px)); }

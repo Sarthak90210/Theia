@@ -8,6 +8,9 @@ import { app, type BrowserWindow } from 'electron'
 import { ExifToolReader } from '../../src/metadata/reader.ts'
 import { HeicPool } from '../../src/thumbs/heic-pool.ts'
 import { videoFrame } from '../../src/thumbs/video.ts'
+import { RenderHost } from '../../src/thumbs/render-host.ts'
+import { thumbPath } from '../../src/thumbs/render.ts'
+import { spawnThumbnailProcess } from './thumb-process.ts'
 import { Embedder } from '../../src/search/embedder.ts'
 import { DIMENSIONS, MODEL_NAME } from '../../src/search/model.ts'
 import { OcrReader } from '../../src/search/ocr.ts'
@@ -102,6 +105,18 @@ export async function runPackagedSmoke(root: string, win: BrowserWindow): Promis
     assert(result.info.width === 64 && result.info.height === 48, 'JPEG dimensions did not survive decoding.')
     versions.sharp = sharp.versions.sharp
     return { width: result.info.width, height: result.info.height, bytes: result.data.length }
+  })
+
+  await check('thumbnail process renders in its own process', async () => {
+    const host = new RenderHost(spawnThumbnailProcess)
+    try {
+      const sha = '0'.repeat(64)
+      const cache = path.join(root, 'thumb-cache')
+      const size = await within(host.render({ file: jpeg, mime: 'image/jpeg', sha256: sha, cacheRoot: cache }), 'thumbnail process')
+      assert(size.width === 64 && size.height === 48, 'Thumbnail process reported the wrong size.')
+      for (const s of ['sm', 'lg', 'ph'] as const) assert(fs.existsSync(thumbPath(cache, sha, s)), `Thumbnail process wrote no ${s} thumbnail.`)
+      return size
+    } finally { host.close() }
   })
 
   await check('bundled ExifTool', async () => {

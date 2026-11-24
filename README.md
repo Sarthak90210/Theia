@@ -130,17 +130,35 @@ Delete moves selected items to **Recently Deleted**;
 until explicitly removed. **Delete permanently** moves the files to the Windows
 Recycle Bin. Nothing is automatically erased after 30 days.
 
+While Hidden is unlocked, it can hold **folders** (Documents, Private, …),
+all opened by the vault's one passcode. Select items in Hidden and choose
+**Move to folder**; make, rename or delete folders from the sidebar. Hidden
+itself still shows everything hidden, deleting a folder leaves its items in
+Hidden, and unhiding an item takes it out of its folder. Folder names and
+contents are not shown, or sent to the window, while Hidden is locked.
+
 Saving shows transfer speed and an estimated time left, including the copy's
 read-back check. In the iPhone save menu, **Delete from iPhone after verified
 save** is off by default and requires confirmation for each save. It verifies
 all originals and companion files, independently rereads both sides, fully
 decodes saved media, and verifies the exact Windows device objects while
 locking destination copies against changes. Anything unsupported, ambiguous,
-changed, incomplete or unchecked stays on the iPhone. Windows deletion may be
+changed, incomplete or unchecked stays on the iPhone, and the summary says how
+many were kept and why. Set the iPhone's **Settings › Photos › Transfer to Mac
+or PC** to **Keep Originals**: otherwise Windows sees converted copies, which
+are not the files Theia saved, so none can be deleted. Windows deletion may be
 permanent and may sync through iCloud Photos. It is never retried automatically.
 Extra deletion-verification work is shown as a separate phase. Live iPhone
 deletion has not yet been qualified; generated-device and driver tests cover
 the safety gates.
+
+A vault on a drive that is unplugged closes cleanly: its background work stops,
+a save into it ends saying what was saved (no originals are deleted), and it
+stays in the sidebar as **not connected** until the drive is back, when it
+opens again by itself. A vault missing when Theia starts is kept the same way.
+
+Maps in photo info are off until switched on in Settings: showing one asks
+OpenStreetMap for the tiles around where the photo was taken.
 
 Use the menu beside a vault in the sidebar to see or copy its location,
 open its folder, remove it from Theia while keeping files, or delete the vault.
@@ -148,7 +166,9 @@ Folder deletion requires typing its name and validates vault ownership and
 path boundaries. Protected system/user folders and overlapping vaults are refused.
 
 The iPhone has separate **Hidden** and **Recently Deleted** collections under
-**Utilities**. Available items can be viewed and saved into a vault. The iPhone
+**Utilities**. Available items can be viewed and saved into a vault, where they
+land in the vault's own Hidden or Recently Deleted and are encrypted (the vault
+needs a Hidden passcode first; Theia asks for one). The iPhone
 supports deletion only through the explicitly enabled verified-save workflow;
 changing its hidden state and recovering its items are done on the iPhone.
 **Refresh phone** reloads the phone's current library.

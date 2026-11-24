@@ -2,6 +2,7 @@ import { execFile, spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { POWERSHELL } from './powershell.ts'
 
 /**
  * The Windows side of a photo's right-click menu, through desktop-helper.ps1:
@@ -51,7 +52,7 @@ export function parseReply<T>(stdout: string): T {
 
 function run<T = { ok: true }>(op: string, args: string[], timeout = 60_000): Promise<T> {
   return new Promise((resolve, reject) => {
-    execFile('powershell.exe', [...ARGS, helper(), op, ...args], { windowsHide: true, timeout, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
+    execFile(POWERSHELL, [...ARGS, helper(), op, ...args], { windowsHide: true, timeout, encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
       try {
         resolve(parseReply<T>(stdout))
       } catch (e) {
@@ -116,7 +117,7 @@ export async function copyFiles(files: string[], image?: string): Promise<void> 
  */
 export function shareFiles(files: string[], at: { x: number; y: number }, parentPid = process.pid): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn('powershell.exe', [...ARGS, helper(), 'share', ...files, 'at', String(Math.round(at.x)), String(Math.round(at.y)), String(parentPid)], {
+    const child = spawn(POWERSHELL, [...ARGS, helper(), 'share', ...files, 'at', String(Math.round(at.x)), String(Math.round(at.y)), String(parentPid)], {
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'ignore'],
     })

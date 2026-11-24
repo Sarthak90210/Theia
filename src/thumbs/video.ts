@@ -26,6 +26,8 @@ export async function videoFrame(file: string, ffmpeg = 'ffmpeg'): Promise<Buffe
   throw new Error('ffmpeg produced no frame')
 }
 
+const GRAB_TIMEOUT_MS = 90_000
+
 function grab(file: string, ffmpeg: string, seconds: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const args = [
@@ -41,6 +43,12 @@ function grab(file: string, ffmpeg: string, seconds: number): Promise<Buffer> {
       '-',
     ]
     const child = spawn(ffmpeg, args, { windowsHide: true })
+    // A damaged file can keep ffmpeg busy for ever, holding a thumbnail slot.
+    const timer = setTimeout(() => {
+      child.kill()
+      reject(new Error(`ffmpeg took longer than ${GRAB_TIMEOUT_MS / 1000} s on this video`))
+    }, GRAB_TIMEOUT_MS)
+    child.on('close', () => clearTimeout(timer))
     const out: Buffer[] = []
     const err: Buffer[] = []
     child.stdout.on('data', (b: Buffer) => out.push(b))

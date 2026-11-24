@@ -17,6 +17,13 @@ export interface CleanupDeps {
   signal?: AbortSignal
 }
 
+/**
+ * Why Windows usually shows no byte-identical original: the iPhone converts
+ * photos and videos for computers (HEIC to JPEG) unless told not to, and a
+ * converted copy is not the file Theia saved, so it is never deleted.
+ */
+export const CONVERTED_HINT = 'If the iPhone converts photos for computers, set Settings › Photos › Transfer to Mac or PC to Keep Originals, then try again.'
+
 /** All selected items are checked before the first driver deletion is requested. */
 export async function cleanupSavedPhone(vault: OpenVault, udid: string, device: DeviceSource, items: SaveItem[],
   assets: Record<string, number>, deps: CleanupDeps): Promise<CleanupResult> {
@@ -44,7 +51,7 @@ export async function cleanupSavedPhone(vault: OpenVault, udid: string, device: 
         try { inventory = await deps.inventory(udid, items.flatMap(i => i.files.map(f => f.name)), deps.signal) }
         catch (e) { inventoryFailure = e as Error; throw e }
       }
-      if (!inventory.deleteSupported) throw new Error('This iPhone driver does not support file deletion.')
+      if (!inventory.deleteSupported) throw new Error('Windows reports that this iPhone connection doesn\'t allow deleting files.')
       const objects: PhoneObject[] = []
       for (const file of checked.files) {
         const candidates = inventory.objects.filter(o => o.canDelete && o.name.toLowerCase() === file.name.toLowerCase() && o.bytes === file.size)
@@ -53,7 +60,7 @@ export async function cleanupSavedPhone(vault: OpenVault, udid: string, device: 
           const current = await deps.hash(udid, candidate, deps.signal)
           if (current.bytes === file.size && current.sha256 === file.sha256) matches.push(current.object)
         }
-        if (matches.length !== 1) throw new Error(`${file.name}: Windows did not expose one unique, byte-identical original that can be deleted.`)
+        if (matches.length !== 1) throw new Error(`${file.name}: Windows did not expose one unique, byte-identical original that can be deleted. ${CONVERTED_HINT}`)
         if (objects.some(o => o.objectId === matches[0]!.objectId) || plans.some(p => p.objects.some(o => o.objectId === matches[0]!.objectId))) throw new Error('A Windows object was matched more than once.')
         objects.push(matches[0]!)
       }

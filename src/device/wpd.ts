@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { POWERSHELL } from '../shell/powershell.ts'
 
 /** Windows Portable Devices objects, never AFC filesystem deletion. */
 export interface PhoneObject {
@@ -61,7 +62,7 @@ async function run<T>(request: object, signal?: AbortSignal, timeout = 600_000):
   signal?.addEventListener('abort', abort, { once: true })
   try {
     return await new Promise<T>((resolve, reject) => {
-      execFile('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-STA', '-ExecutionPolicy', 'Bypass', '-File', helper, requestPath],
+      execFile(POWERSHELL, ['-NoLogo', '-NoProfile', '-NonInteractive', '-STA', '-ExecutionPolicy', 'Bypass', '-File', helper, requestPath],
         { windowsHide: true, signal, timeout, maxBuffer: 64 * 1024 * 1024, encoding: 'utf8' }, (error, stdout, stderr) => {
           if (error) return reject(new Error(signal?.aborted ? 'Stopped. Any delete already accepted by Windows may have completed.' :
             `Windows photo verification failed: ${stderr.trim() || error.message}`))

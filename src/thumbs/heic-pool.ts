@@ -79,14 +79,20 @@ export class HeicPool {
 
     // A worker that dies (out of memory on a pathological file, say) takes its
     // job with it. Replace it so the pool keeps its size.
-    worker.on('error', (e) => {
+    const replace = (e: Error) => {
       const job = slot.busy
       slot.busy = null
-      job?.reject(e instanceof Error ? e : new Error(String(e)))
+      job?.reject(e)
       if (this.closed) return
       const i = this.slots.indexOf(slot)
       if (i >= 0) this.slots[i] = this.spawn()
       this.pump()
+    }
+    worker.on('error', (e) => replace(e instanceof Error ? e : new Error(String(e))))
+    // One that ends without an error event (exited, or killed) too: otherwise
+    // its slot stays taken and the job it held waits for ever.
+    worker.on('exit', (code) => {
+      if (this.slots.includes(slot)) replace(new Error(`the HEIC decoder stopped (exit code ${code})`))
     })
 
     return slot

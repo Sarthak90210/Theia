@@ -3,6 +3,7 @@ import { promisify } from 'node:util'
 import { UsbmuxConnection } from '../protocol/usbmux.ts'
 import { LockdownClient, LOCKDOWN_PORT, TLS_STRATEGIES, type PairRecord } from '../protocol/lockdown.ts'
 import { parsePlist } from '../protocol/plist-io.ts'
+import { POWERSHELL } from '../shell/powershell.ts'
 
 /**
  * Which of the four layers between Windows and the phone is broken, and what
@@ -153,7 +154,7 @@ const run = promisify(execFile)
 export const realProbes: Probes = {
   async serviceRunning() {
     const { stdout } = await run(
-      'powershell',
+      POWERSHELL,
       ['-NoProfile', '-Command', "(Get-Service 'Apple Mobile Device Service' -ErrorAction SilentlyContinue).Status"],
       { windowsHide: true },
     )
@@ -166,7 +167,7 @@ export const realProbes: Probes = {
       $now = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object { $_.InstanceId -match 'VID_05AC' })
       [pscustomobject]@{ present = $now.Count; ghosts = $all.Count } | ConvertTo-Json -Compress
     `
-    const { stdout } = await run('powershell', ['-NoProfile', '-Command', script], { windowsHide: true })
+    const { stdout } = await run(POWERSHELL, ['-NoProfile', '-Command', script], { windowsHide: true })
     const parsed = JSON.parse(stdout.trim())
     return { present: parsed.present > 0, ghosts: parsed.ghosts }
   },

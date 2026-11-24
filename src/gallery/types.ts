@@ -21,6 +21,8 @@ export interface Collections {
   albums: CollectionInfo[]
   /** Vaults with face grouping on: how many people, and how many wait for a name. */
   people?: { count: number; unnamed: number }
+  /** Folders inside Hidden (`hidden:<id>`). Only sent while the vault is unlocked. */
+  hiddenFolders?: CollectionInfo[]
 }
 
 export type ItemKind = 'photo' | 'video' | 'live' | 'burst'

@@ -47,7 +47,8 @@ export interface AppSettings {
 export const DEFAULT_CUSTOM_THEME: Readonly<CustomTheme> = { background: '#1b1d23', surface: '#262a33', text: '#e8eaf0', accent: '#7aa2f7' }
 
 export const DEFAULT_SETTINGS: Readonly<AppSettings> = {
-  mapsEnabled: true,
+  // Off until chosen: showing a map sends the photo's area to OpenStreetMap.
+  mapsEnabled: false,
   indexing: true,
   searchByMeaning: true,
   searchText: true,

@@ -52,12 +52,18 @@ export interface ByteSource {
  */
 export const SOURCE_CHUNK = 1024 * 1024
 
+/** Files up to this size are answered from one read rather than streamed. */
+export const WHOLE_FILE_MAX = 8 * 1024 * 1024
+
 export async function rangeResponse(
   body: { file: string } | { source: ByteSource },
   rangeHeader: string | null,
   headers: Record<string, string>,
 ): Promise<Response> {
-  const size = 'file' in body ? fs.statSync(body.file).size : body.source.size
+  // Asynchronously: this runs on Electron's main thread for every tile in the
+  // grid, and a stat on a sleeping USB disk can take tens of milliseconds.
+  // Throws ENOENT for a missing file, which the caller answers with a 404.
+  const size = 'file' in body ? (await fs.promises.stat(body.file)).size : body.source.size
   const range = parseRange(rangeHeader, size)
   const base = { ...headers, 'Accept-Ranges': 'bytes' }
   if (range === 'invalid') {
@@ -68,6 +74,15 @@ export async function rangeResponse(
   const out: Record<string, string> = { ...base, 'Content-Length': String(size === 0 ? 0 : end - start + 1) }
   if (status === 206) out['Content-Range'] = `bytes ${start}-${end}/${size}`
   if (size === 0) return new Response(null, { status: 200, headers: out })
+  // A thumbnail or photo whole: one read and a buffer is far cheaper than a
+  // Node stream bridged to a web stream, which is what a grid of hundreds of
+  // small images was paying for each one.
+  if ('file' in body && !range && size <= WHOLE_FILE_MAX) {
+    const bytes = await fs.promises.readFile(body.file)
+    // What was read, in case the file was replaced since the stat.
+    out['Content-Length'] = String(bytes.length)
+    return new Response(new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.length), { status, headers: out })
+  }
   const stream =
     'file' in body
       ? (Readable.toWeb(fs.createReadStream(body.file, { start, end, highWaterMark: 1024 * 1024 })) as ReadableStream)

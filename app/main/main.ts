@@ -3,6 +3,7 @@ import os from 'node:os'
 import { execFile } from 'node:child_process'
 import path from 'node:path'
 import { app, BrowserWindow, dialog, powerMonitor, ipcMain, nativeImage, nativeTheme, net, powerSaveBlocker, protocol, shell } from 'electron'
+import { spawnThumbnailProcess } from './thumb-process.ts'
 import { pathToFileURL } from 'node:url'
 import { INVOKE_CHANNELS, MEDIA_SCHEME, STATE_CHANNEL, type AppState } from '../shared/api.ts'
 import { GalleryService } from './gallery-service.ts'
@@ -10,6 +11,7 @@ import { windowColours } from '../shared/themes.ts'
 import { MapTiles } from './map-tiles.ts'
 import { rangeResponse } from '../../src/media/ranges.ts'
 import { preparePackagedSmoke, runPackagedSmoke } from './packaged-smoke.ts'
+import { POWERSHELL } from '../../src/shell/powershell.ts'
 
 declare const THEIA_DEVELOPMENT: boolean
 const devHarnessDir = THEIA_DEVELOPMENT && !app.isPackaged ? process.env.PHOTOS_DEV_DIR : undefined
@@ -45,6 +47,29 @@ if (path.resolve(initialProfile).toLowerCase() === path.resolve(app.getPath('app
   app.setPath('userData', path.join(app.getPath('appData'), 'photos-win-prototype'))
 }
 app.setName('Theia')
+
+/**
+ * The last line of defence. An error nothing caught, in this process, used to
+ * end in Electron's "A JavaScript error occurred in the main process" box: an
+ * unplugged vault drive did it, through a SQLite error from a timer. Now it is
+ * written to logs\main-errors.log under the profile folder, and the drives are
+ * checked, since an unplugged one is the likeliest cause; the app carries on.
+ */
+const errorLog = path.join(app.getPath('userData'), 'logs', 'main-errors.log')
+function logMainError(kind: string, e: unknown) {
+  console.error(`[${kind}]`, e)
+  try {
+    fs.mkdirSync(path.dirname(errorLog), { recursive: true })
+    // Kept small: the newest megabyte or so, the one before as .old.
+    if ((fs.statSync(errorLog, { throwIfNoEntry: false })?.size ?? 0) > 1024 * 1024) fs.renameSync(errorLog, `${errorLog}.old`)
+    fs.appendFileSync(errorLog, `${new Date().toISOString()} ${kind}: ${(e as Error)?.stack ?? String(e)}\n`)
+  } catch {
+    /* nowhere to write it: the console has it */
+  }
+  void service?.checkDrives()
+}
+process.on('uncaughtException', (e) => logMainError('uncaught exception', e))
+process.on('unhandledRejection', (e) => logMainError('unhandled rejection', e))
 
 // Thumbnails and videos are files on disk. Serving them on a scheme of our own
 // lets <img> and <video> load them directly, with range requests for seeking,
@@ -164,6 +189,8 @@ app.whenReady().then(async () => {
     openExternal: (url) => shell.openExternal(url),
     trash: (file) => shell.trashItem(file),
     recycleBinLimit,
+    // Thumbnails in their own process: a decoder crash costs one thumbnail, not the app.
+    spawnThumbnailProcess,
     // Shipped with the app (electron-builder extraResources), never downloaded.
     modelsDir: app.isPackaged
       ? path.join(process.resourcesPath, 'models')
@@ -192,18 +219,25 @@ app.whenReady().then(async () => {
       const [source, what, key] = url.pathname.split('/').filter(Boolean).map(decodeURIComponent)
       if (!source || !what || !key) return new Response('bad request', { status: 400 })
       const m = await service!.media(source, what, key)
-      if (!m || ('path' in m && !fs.existsSync(m.path))) {
+      const notFound = () => {
         if (process.env.PHOTOS_DEV_DIR) console.warn(`[media] 404 ${what} ${key}`)
         return new Response('not found', { status: 404 })
       }
+      if (!m) return notFound()
       // Range answers by hand: protocol.handle does not do them, and without
       // a 206 a video cannot seek. Videos and previews can change (a
       // conversion finishing), so only images are cached for long.
       const cache = 'no-store'
+      // No existsSync first: a missing file shows up as ENOENT from the
+      // asynchronous read, without a blocking stat on the main thread.
       const res = await rangeResponse('path' in m ? { file: m.path } : { source: m.source }, req.headers.get('range'), {
         'Content-Type': m.mime,
         'Cache-Control': cache,
+      }).catch((e: NodeJS.ErrnoException) => {
+        if (e.code === 'ENOENT') return null
+        throw e
       })
+      if (!res) return notFound()
       if (process.env.PHOTOS_DEV_DIR && what === 'video') {
         console.warn(`[media] video ${req.headers.get('range')} -> ${res.status} ${res.headers.get('content-range')} ${res.headers.get('content-length')}`)
       }
@@ -231,8 +265,13 @@ app.whenReady().then(async () => {
   if (smokeDirectory) await runPackagedSmoke(path.resolve(smokeDirectory), win!)
   else service.start()
   // Hidden and Recently Deleted lock again when Windows locks or sleeps.
-  powerMonitor.on('lock-screen', () => service?.lockAll())
-  powerMonitor.on('suspend', () => service?.lockAll())
+  // Like the Lock button, including the window's own cache of what it showed.
+  const lockEverything = () => {
+    service?.lockAll()
+    void win?.webContents.session.clearCache()
+  }
+  powerMonitor.on('lock-screen', lockEverything)
+  powerMonitor.on('suspend', lockEverything)
   if (THEIA_DEVELOPMENT && devHarnessDir) startDevHarness(devHarnessDir)
 })
 
@@ -268,6 +307,12 @@ function startDevHarness(dir: string) {
     offset = text.length
     for (const line of lines) {
       console.log(`[dev] ${line}`)
+      // `size <width> <height>`: the window at another size, to check the layout.
+      const size = /^size (\d+) (\d+)$/.exec(line.trim())
+      if (size) {
+        win?.setSize(Number(size[1]), Number(size[2]))
+        continue
+      }
       if (line.startsWith('js ')) {
         win?.webContents
           .executeJavaScript(line.slice(3))
@@ -326,7 +371,7 @@ function recycleBinLimit(dir: string): Promise<{ maxBytes: number; nukeOnDelete:
     `@{ max = [int64]$k.MaxCapacity; nuke = [int]$k.NukeOnDelete } | ConvertTo-Json -Compress`,
   ].join('; ')
   return new Promise((resolve) => {
-    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 15000 }, (err, out) => {
+    execFile(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 15000 }, (err, out) => {
       if (err) return resolve(null)
       try {
         const j = JSON.parse(out) as { max: number; nuke: number }

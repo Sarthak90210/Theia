@@ -139,7 +139,8 @@ describe('saving a folder into a vault', () => {
     const kinds = (v.db.prepare('SELECT kind FROM asset ORDER BY kind').all() as { kind: string }[]).map((r) => r.kind)
     expect(kinds).toEqual(['live', 'still'])
     const master = v.db.prepare(`SELECT path FROM file WHERE bytes = ?`).get(big.length) as { path: string }
-    expect(fs.readFileSync(path.join(v.layout.media, ...master.path.split('/')))).toEqual(big)
+    // Buffer.equals, not toEqual: a deep compare of 5 MB took up to 36 s and made this test time out.
+    expect(fs.readFileSync(path.join(v.layout.media, ...master.path.split('/'))).equals(big)).toBe(true)
     expect((v.db.prepare('SELECT name FROM album').all() as { name: string }[]).map((a) => a.name)).toEqual(['Trip'])
 
     // Known by identity: nothing is read from disk the second time.

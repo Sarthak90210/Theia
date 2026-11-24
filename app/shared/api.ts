@@ -74,6 +74,12 @@ export interface VaultInfo {
   protectionError?: string | null
 }
 
+/** A vault whose drive isn't plugged in: it opens again by itself when the drive is back. */
+export interface OfflineVaultInfo {
+  root: string
+  name: string
+}
+
 export type SaveState =
   | { status: 'idle' }
   | {
@@ -109,6 +115,8 @@ export interface AppState {
   settings: AppSettings
   devices: DeviceInfo[]
   vaults: VaultInfo[]
+  /** Vaults on drives that aren't connected now. */
+  offlineVaults: OfflineVaultInfo[]
   /**
    * Why no phone can be opened, when Windows sees one but it is not usable,
    * or nothing is plugged in at all. Null while a phone is ready.
@@ -205,6 +213,17 @@ export interface PhotosApi {
   saveEditedCopy(source: SourceId, key: string, recipe: EditRecipe): Promise<string>
   getState(): Promise<AppState>
   onState(listener: (state: AppState) => void): () => void
+  /** The person is scrolling: background indexing holds off for a moment. */
+  userActive(): Promise<void>
+  /** Stop listing a vault whose drive isn't connected. Nothing on the drive is touched. */
+  forgetVault(root: string): Promise<void>
+  /** Folders inside Hidden, all opened with the vault's passcode. Hidden must be unlocked. Returns the new folder's collection id. */
+  createHiddenFolder(source: SourceId, name: string): Promise<string>
+  renameHiddenFolder(source: SourceId, folder: string, name: string): Promise<void>
+  /** Removes the folder; its items stay in Hidden. */
+  deleteHiddenFolder(source: SourceId, folder: string): Promise<void>
+  /** Hidden items into a folder, or out of any folder (null). */
+  moveToHiddenFolder(source: SourceId, keys: string[], folder: string | null): Promise<number>
 
   collections(source: SourceId): Promise<Collections>
   /** A collection's items, or a search's results, best first, for `searchCollection(query)`. */
@@ -325,6 +344,12 @@ export interface PhotosApi {
 export const STATE_CHANNEL = 'photos:state'
 export const INVOKE_CHANNELS = [
   'setSettings',
+  'userActive',
+  'forgetVault',
+  'createHiddenFolder',
+  'renameHiddenFolder',
+  'deleteHiddenFolder',
+  'moveToHiddenFolder',
   'editPreview',
   'saveEditedCopy',
   'getState',

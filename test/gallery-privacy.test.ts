@@ -156,3 +156,52 @@ describe('gallery privacy integration', () => {
     expect(result && 'source' in result).toBe(true)
   })
 })
+
+describe('folders inside Hidden', () => {
+  it('sorts hidden items into folders opened by the one passcode, and shows none of it while locked', async () => {
+    // Not before there is a passcode, nor while Hidden is locked.
+    await expect(service.createHiddenFolder(id, 'Documents')).rejects.toThrow('PROTECTION_NEEDED')
+    const recovery = await service.setUpProtection(id, passcode)
+    await service.setHidden(id, [itemKey], true)
+
+    const docs = await service.createHiddenFolder(id, '  Documents  ')
+    await expect(service.createHiddenFolder(id, 'documents')).rejects.toThrow('already a folder')
+    await expect(service.createHiddenFolder(id, '   ')).rejects.toThrow('name')
+    const priv = await service.createHiddenFolder(id, 'Private')
+    expect((await service.collections(id)).hiddenFolders?.map((f) => [f.name, f.count])).toEqual([['Documents', 0], ['Private', 0]])
+
+    expect(await service.moveToHiddenFolder(id, [itemKey], docs)).toBe(1)
+    expect((await service.items(id, docs)).map((i) => i.key)).toEqual([itemKey])
+    expect(await service.items(id, priv)).toEqual([])
+    // Hidden itself still shows everything hidden, folder or not.
+    expect((await service.items(id, 'hidden')).map((i) => i.key)).toEqual([itemKey])
+    expect((await service.collections(id)).hiddenFolders?.find((f) => f.id === docs)).toMatchObject({ count: 1, cover: itemKey })
+
+    // Locked: no folder names, no folder contents.
+    service.lockVault(id)
+    expect((await service.collections(id)).hiddenFolders).toBeUndefined()
+    expect(await service.items(id, docs)).toEqual([])
+    await expect(service.moveToHiddenFolder(id, [itemKey], priv)).rejects.toThrow('Unlock')
+    await service.unlockVault(id, recovery)
+
+    await service.renameHiddenFolder(id, docs, 'Papers')
+    await expect(service.renameHiddenFolder(id, docs, 'private')).rejects.toThrow('already a folder')
+    expect((await service.collections(id)).hiddenFolders?.map((f) => f.name)).toEqual(['Papers', 'Private'])
+
+    // Deleting a folder keeps what was in it, hidden.
+    await service.deleteHiddenFolder(id, docs)
+    expect((await service.collections(id)).hiddenFolders?.map((f) => f.name)).toEqual(['Private'])
+    expect((await service.items(id, 'hidden')).map((i) => i.key)).toEqual([itemKey])
+
+    // Unhiding takes it out of its folder too.
+    await service.moveToHiddenFolder(id, [itemKey], priv)
+    await service.setHidden(id, [itemKey], false)
+    expect(await service.items(id, priv)).toEqual([])
+    await service.setHidden(id, [itemKey], true)
+    expect(await service.items(id, priv)).toEqual([])
+    expect((await service.items(id, 'hidden')).map((i) => i.key)).toEqual([itemKey])
+    // Only items in Hidden can be moved into a folder.
+    await service.setHidden(id, [itemKey], false)
+    expect(await service.moveToHiddenFolder(id, [itemKey], priv)).toBe(0)
+  })
+})

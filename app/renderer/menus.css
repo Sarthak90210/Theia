@@ -102,6 +102,8 @@
 }
 /* The timeline is the scrollbar here. */
 .grid.with-timeline { scrollbar-width: none; }
+/* Room for the timeline (RAIL in Grid.tsx): a day's Select button sat under it. */
+.grid.with-timeline .grid-header { right: 58px; }
 .grid.with-timeline::-webkit-scrollbar { width: 0; }
 
 .timeline {

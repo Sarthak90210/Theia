@@ -192,11 +192,11 @@ export function StatusBar({ state }: { state: AppState }) {
         </div>
       )}
       {s.status === 'done' && (
-        <div className={`status-save ${s.failed.length ? 'attention' : ''}`}>
+        <div className={`status-save ${s.failed.length || s.cleanup?.kept ? 'attention' : ''}`}>
           <span>{doneText(s)}</span>
           {(s.failed.length > 0 || !!s.cleanup?.reasons.length) && (
             <button className="link" onClick={() => setShowFailed((v) => !v)}>
-              {showFailed ? 'Hide' : 'Show'} what failed
+              {showFailed ? 'Hide' : 'Show'} {s.failed.length ? 'what failed' : 'why'}
             </button>
           )}
           <button className="ghost small" onClick={() => void window.photos.dismissSave()}>
@@ -221,7 +221,12 @@ export function StatusBar({ state }: { state: AppState }) {
               <span className="mono">{f.file}</span> <span className="muted">{f.reason}</span>
             </li>
           ))}
-          {s.cleanup?.reasons.map((r, i) => <li key={`cleanup-${i}`}><span>{r.item}</span> <span className="muted">{s.cleanup?.from === 'folder' ? 'Original kept' : 'iPhone cleanup'}: {r.reason}</span></li>)}
+          {groupReasons(s.cleanup?.reasons ?? []).map((g, i) => (
+            <li key={`cleanup-${i}`}>
+              <span>{g.items.length === 1 ? g.items[0] : `${count(g.items.length)} items (${g.items.slice(0, 3).join(', ')}${g.items.length > 3 ? ', …' : ''})`}</span>{' '}
+              <span className="muted">{s.cleanup?.from === 'folder' ? 'Original kept' : 'Kept on iPhone'}: {g.reason}</span>
+            </li>
+          ))}
         </ul>
       )}
       <IndexingStatus state={state} />
@@ -242,8 +247,25 @@ function doneText(s: Extract<AppState['save'], { status: 'done' }>): string {
   if (s.skippedCloud) parts.push(`${plural(s.skippedCloud, 'item')} only in iCloud ${s.skippedCloud === 1 ? 'was' : 'were'} skipped`)
   if (s.failed.length) parts.push(`${count(s.failed.length)} failed`)
   if (s.cleanup?.from === 'folder') parts.push(`${plural(s.cleanup.deleted, 'original')} moved to the Recycle Bin${s.cleanup.kept ? `, ${count(s.cleanup.kept)} kept` : ''}`)
-  else if (s.cleanup) parts.push(`${s.cleanup.deleted} deleted from iPhone, ${s.cleanup.kept} kept or not confirmed deleted`)
-  return parts.join(', ') + '.'
+  const text = parts.join(', ') + '.'
+  // The iPhone's part on its own: "0 deleted" in the middle of a long line read like success.
+  if (s.cleanup && s.cleanup.from !== 'folder') {
+    const { deleted, kept } = s.cleanup
+    if (!deleted) return `${text} Nothing was deleted from the iPhone: ${kept ? `all ${count(kept)} were kept on it` : 'no item could be deleted'}.`
+    return `${text} ${plural(deleted, 'item')} deleted from the iPhone${kept ? `; ${count(kept)} kept on it` : ''}.`
+  }
+  return text
+}
+
+/** The same reason for many photos, said once, with how many and which. */
+function groupReasons(reasons: { item: string; reason: string }[]): { reason: string; items: string[] }[] {
+  const by = new Map<string, string[]>()
+  for (const r of reasons) {
+    // A file name at the start ("IMG_0001.HEIC: …") is about one photo; the rest is the reason.
+    const reason = r.reason.replace(/^[^:\s]+\.[A-Za-z0-9]{2,5}: /, '')
+    by.set(reason, [...(by.get(reason) ?? []), r.item])
+  }
+  return [...by].map(([reason, items]) => ({ reason, items }))
 }
 
 /**
@@ -378,7 +400,7 @@ export function AddPhotosMenu({ onAddFolder, onAddFiles, disabled }: AddPhotosMe
         aria-expanded={open}
         title="Add photos from a folder or files on this computer"
       >
-        <I.Plus size={16} /> Add photos…
+        <I.Plus size={16} /> <span className="add-label">Add photos…</span>
       </button>
       {open && (
         <div className="menu" role="menu">

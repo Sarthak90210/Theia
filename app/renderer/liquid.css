@@ -132,12 +132,12 @@ button:active:not(:disabled) { opacity: 0.82; }
 .toolbar-row > .toolbar-title { flex: 1; min-width: 0; }
 .toolbar-title h1 { font-size: 28px; font-weight: 700; letter-spacing: -0.025em; line-height: 1.15; }
 .toolbar-title .small { margin-top: 3px; }
-.toolbar-row.toolbar-controls { margin: 0; justify-content: flex-start; }
+.toolbar-row.toolbar-controls { margin: 0; justify-content: flex-start; flex-wrap: wrap; row-gap: 8px; }
 .toolbar-row.toolbar-controls > .glass-zoom { margin-left: auto; }
 .chrome-top > .collection-note { margin: 0 28px 10px; }
 
 /* The search field is a capsule of glass of its own. */
-.glass-search { flex: 1 1 280px; max-width: 440px; min-width: 180px; padding: 0; }
+.glass-search { flex: 1 1 180px; max-width: 440px; min-width: 180px; padding: 0; }
 .glass-search .search-box { flex: 1; max-width: none; background: none; border: 0; box-shadow: none; height: 38px; }
 .glass-search:focus-within { box-shadow: 0 0 0 2px var(--focus), var(--glass-rim), var(--glass-lift); }
 .glass-zoom { padding: 0 14px; }
@@ -147,6 +147,8 @@ button:active:not(:disabled) { opacity: 0.82; }
 .glass-segmented { padding: 3px; }
 .glass-segmented .tabs { position: relative; display: grid; grid-template-columns: repeat(var(--tabs), 1fr); background: none; border: 0; box-shadow: none; padding: 0; gap: 0; }
 .glass-segmented .tab { position: relative; z-index: 1; background: none !important; box-shadow: none !important; min-height: 32px; padding: 0 16px; font-size: 12px; transition: color 0.2s; }
+/* Each label centred in its cell, under the sliding pill: they were left-aligned, so "Days" sat 15 px off the pill's centre. */
+.glass-segmented .tab { display: flex; align-items: center; justify-content: center; text-align: center; white-space: nowrap; }
 .glass-segmented .tab.on { font-weight: 600; }
 .tab-thumb {
   position: absolute;
@@ -179,6 +181,9 @@ button:active:not(:disabled) { opacity: 0.82; }
   transition: bottom 0.22s ease;
 }
 .main:has(> .status) .floating-bottom { bottom: 76px; }
+/* Above the selection bar, not over its buttons (it rises when the status pill shows). */
+.toast.above-bar { bottom: 96px !important; }
+.app:has(.main > .status) .toast.above-bar { bottom: 152px !important; }
 .floating-bottom .menu {
   top: auto;
   bottom: calc(100% + 10px);

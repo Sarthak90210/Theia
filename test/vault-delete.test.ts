@@ -77,6 +77,26 @@ describe('deleting from a vault', () => {
     v.db.close()
   })
 
+  it('moves album links first, so a file the Recycle Bin refuses leaves the item whole', async () => {
+    const v = createVault(path.join(base, 'V'))
+    await saveToVault(v, [item('a', [memFile('IMG_0005.HEIC', makeHeic({ mdatBytes: 700 }))])], [{ uuid: 'AL', name: 'Trip', keys: ['a'] }])
+    const id = Number(vaultItems(v.db, 'library')[0]!.key)
+    const main = path.join(v.layout.media, (v.db.prepare('SELECT path FROM file WHERE asset_id = ?').get(id) as { path: string }).path)
+    trashAssets(v.db, [id])
+    const order: string[] = []
+    const r = await purgeAssets(v.db, v.layout.media, [id], async (p) => {
+      order.push(p)
+      if (p === main) throw new Error('file in use')
+      fs.rmSync(p)
+    })
+    // The link went first; the vault's own copy, refused, is still there and still listed.
+    expect(order.at(-1)).toBe(main)
+    expect(r.removed).toBe(0)
+    expect(fs.existsSync(main)).toBe(true)
+    expect(vaultItems(v.db, 'deleted')).toHaveLength(1)
+    v.db.close()
+  })
+
   it('does not purge an item that is not in Recently Deleted', async () => {
     const v = createVault(path.join(base, 'V'))
     await saveToVault(v, [item('a', [memFile('IMG_0003.HEIC', makeHeic({ mdatBytes: 500 }))])], [])

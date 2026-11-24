@@ -121,7 +121,8 @@ export function SetUpProtection({ vault, vaultName, onDone, onCancel }: { vault:
 }
 
 /** The passcode (or recovery key) form, used inline on the locked screen and as a dialog. */
-export function UnlockForm({ vault, onUnlocked }: { vault: SourceId; onUnlocked: () => void }) {
+/** `onCancel`: in a dialog, Cancel sits beside Unlock, in the same row. */
+export function UnlockForm({ vault, onUnlocked, onCancel }: { vault: SourceId; onUnlocked: () => void; onCancel?: () => void }) {
   const [secret, setSecret] = useState('')
   const [recovery, setRecovery] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -175,9 +176,12 @@ export function UnlockForm({ vault, onUnlocked }: { vault: SourceId; onUnlocked:
         <button type="button" className="link" onClick={() => setRecovery((r) => !r)}>
           {recovery ? 'Use the passcode' : 'Use the recovery key'}
         </button>
-        <button type="submit" className="primary" disabled={!secret || busy}>
-          {busy ? 'Unlocking…' : 'Unlock'}
-        </button>
+        <div className="unlock-buttons">
+          {onCancel && <button type="button" className="ghost" onClick={onCancel}>Cancel</button>}
+          <button type="submit" className="primary" disabled={!secret || busy}>
+            {busy ? 'Unlocking…' : 'Unlock'}
+          </button>
+        </div>
       </div>
     </form>
   )
@@ -238,12 +242,7 @@ export function UnlockDialog({ vault, vaultName, onDone, onCancel }: { vault: So
           <h2 id="unlock-title">Unlock {vaultName}</h2>
         </div>
         <p className="muted">Hidden and Recently Deleted are encrypted. Enter the passcode to continue.</p>
-        <UnlockForm vault={vault} onUnlocked={onDone} />
-        <div className="dialog-buttons">
-          <button className="ghost" onClick={onCancel}>
-            Cancel
-          </button>
-        </div>
+        <UnlockForm vault={vault} onUnlocked={onDone} onCancel={onCancel} />
       </div>
     </div>
   )

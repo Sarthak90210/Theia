@@ -199,7 +199,11 @@ export function checkIsoBmff(src: RandomAccess): StructureResult {
       'no moov box, the video has no index and will not play; the transfer was truncated',
     )
   }
-  if (error) return fail(format, error)
+  if (error) {
+    const trailer = isStill ? null : appTrailer(src, boxes)
+    if (trailer === null || first?.type !== 'ftyp') return fail(format, error)
+    return pass(format, `${trailer} bytes after the end of the video (an app's trailer)`)
+  }
   if (!first || first.type !== 'ftyp') return fail(format, 'no ftyp box at the start of the file')
 
   if (isStill) {
@@ -210,6 +214,24 @@ export function checkIsoBmff(src: RandomAccess): StructureResult {
 
   if (!types.has('mdat')) return fail(format, 'no mdat box, the video carries no samples')
   return pass(format)
+}
+
+/**
+ * Bytes after a whole video that aren't a box: some apps (WhatsApp, for one)
+ * leave a few KB there. The index (moov) and samples (mdat) are complete and
+ * the video plays to the end, so it isn't truncated. A cut-off real box has a
+ * readable four-letter type and still fails. Returns the trailer's length, or
+ * null when what follows could be a real box.
+ */
+function appTrailer(src: RandomAccess, boxes: Box[]): number | null {
+  if (!boxes.some((b) => b.type === 'moov') || !boxes.some((b) => b.type === 'mdat')) return null
+  const last = boxes[boxes.length - 1]!
+  const end = last.start + last.size
+  const rest = src.size - end
+  if (rest <= 0) return null
+  if (rest < 8) return rest
+  const type = src.read(end + 4, 4).toString('latin1')
+  return /^[\x20-\x7e]{4}$/.test(type) ? null : rest
 }
 
 /* ------------------------------------------------------------------- PNG */

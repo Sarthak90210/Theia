@@ -26,6 +26,8 @@
 .collection-note { padding: 9px 18px; color: var(--muted); background: var(--surface-2); border-bottom: 1px solid var(--line); font-size: 12px; }
 .modal-scrim { position: fixed; inset: var(--titlebar-h) 0 0 0; z-index: 110; background: #0008; display: grid; place-items: center; }
 .confirm-dialog { background: var(--surface); color: var(--text); border-radius: 12px; box-shadow: var(--shadow); padding: 24px; max-width: 480px; display: grid; gap: 18px; }
+/* Never taller than the window: a long dialog scrolls instead of pushing its buttons off screen (the window can be 560 px tall). */
+.confirm-dialog { max-height: calc(100vh - 44px - 24px); overflow-y: auto; overscroll-behavior: contain; }
 .dialog-buttons { justify-content: flex-end; }
 .editor { position: fixed; inset: 0; z-index: 100; background: var(--bg); display: flex; flex-direction: column; }
 .editor-bar { display: flex; justify-content: space-between; align-items: center; padding: 14px 20px; border-bottom: 1px solid var(--line); }
@@ -137,6 +139,10 @@ p {
   display: flex;
   flex-direction: column;
 }
+/* Empty, locked and welcome states scroll when the window is too short for
+   them (the Unlock button was cut off at 560 px), and stay centred otherwise:
+   "safe" keeps their top reachable once they overflow. */
+.stage > .empty { min-height: 0; overflow-y: auto; justify-content: safe center; }
 
 /* --------------------------------------------------------------- buttons */
 

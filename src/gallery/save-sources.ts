@@ -25,7 +25,7 @@ export function vaultSaveItems(
   openProtected?: (encryptedPath: string) => AsyncIterable<Buffer>,
 ): SaveItem[] {
   const get = db.prepare(
-    `SELECT a.id, kind, captured_utc, captured_offset, width, height, duration_ms, favourite, has_adjustments,
+    `SELECT a.id, kind, captured_utc, captured_offset, width, height, duration_ms, favourite, hidden, deleted_at, has_adjustments,
             subtype, source_uuid, time_source, a.lat, a.lon, created_at,
             p.label AS place_label, p.city AS place_city, p.region AS place_region, p.country AS place_country
        FROM asset a LEFT JOIN place p ON p.id = a.place_id WHERE a.id = ?`,
@@ -42,6 +42,8 @@ export function vaultSaveItems(
           height: number | null
           duration_ms: number | null
           favourite: number
+          hidden: number
+          deleted_at: number | null
           has_adjustments: number
           subtype: string | null
           source_uuid: string | null
@@ -83,6 +85,8 @@ export function vaultSaveItems(
       edited: a.has_adjustments === 1,
       subtype: a.subtype,
       sourceUuid: a.source_uuid,
+      hidden: a.hidden === 1,
+      deletedAt: a.deleted_at,
       // Already worked out when it came into this vault; carried, not redone.
       timeSource: a.time_source,
       lat: a.lat,
@@ -168,6 +172,7 @@ export async function phoneSaveItems(session: PhoneSession, device: DeviceSource
       edited: a.edited,
       subtype: a.subtype,
       sourceUuid: framesOnly && a.kind === 'burst' ? `${a.key}:frame` : a.key,
+      ...phonePrivacy(session, key),
       // An Android date comes from the file name or the file's date: the
       // photo's own EXIF date is better when it has one.
       timeSource: session.platform === 'android' ? 'filesystem' : 'phone',
@@ -194,9 +199,23 @@ export function phoneProbeItems(session: PhoneSession, keys: string[], framesOnl
     out.push({
       key, kind: frame ? 'photo' : a.kind, t: a.t, off: a.off, w: a.w, h: a.h, dur: a.dur, fav: a.fav, edited: a.edited,
       subtype: a.subtype, sourceUuid: frame ? `${a.key}:frame` : a.key, lat: a.lat, lon: a.lon, cloud: a.cloud, files: [],
+      ...phonePrivacy(session, key),
     })
   }
   return out
+}
+
+/**
+ * The phone's Hidden album and Recently Deleted, carried into the vault: a
+ * hidden photo is hidden there too, a deleted one goes to its Recently
+ * Deleted with the date the phone deleted it.
+ */
+function phonePrivacy(session: PhoneSession, key: string): Pick<SaveItem, 'hidden' | 'deletedAt'> {
+  const where = session.privacyOf(key)
+  return {
+    hidden: where === 'hidden',
+    deletedAt: where === 'deleted' ? (session.asset(key)?.deletedAt ?? Date.now()) : null,
+  }
 }
 
 export function phoneSaveAlbums(session: PhoneSession): SaveAlbum[] {

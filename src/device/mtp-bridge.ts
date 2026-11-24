@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DeviceDetachedError } from './types.ts'
+import { POWERSHELL } from '../shell/powershell.ts'
 
 /**
  * A conversation with mtp-helper.ps1: one PowerShell process that holds one
@@ -55,7 +56,7 @@ export function spawnHelper(): BridgeProcess {
   const dir = mtpHelperDirectory()
   if (!dir) throw new Error('The Android phone helper is missing. Rebuild or reinstall Theia.')
   const child: ChildProcessWithoutNullStreams = spawn(
-    'powershell.exe',
+    POWERSHELL,
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-STA', '-ExecutionPolicy', 'Bypass', '-File', path.join(dir, HELPER)],
     { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] },
   )
