@@ -230,8 +230,8 @@ export class GalleryService {
     if (gemma && !this.embedder) console.warn(`search model missing from ${gemma}; search by meaning is off`)
     if (ppocr && !this.ocr) console.warn(`text reading models missing from ${ppocr}; search by text in photos is off`)
     this.registry = new DeviceRegistry<PhoneSession>({
-      open: async (udid) => {
-        if (isAndroidId(udid)) return this.openAndroid(udid)
+      open: async (udid, onScanProgress) => {
+        if (isAndroidId(udid)) return this.openAndroid(udid, onScanProgress)
         const device = await AfcDevice.attach(udid)
         const ident = await device.identity()
         try {
@@ -242,6 +242,8 @@ export class GalleryService {
             cacheRoot: path.join(deps.userData, 'phones'),
             heic: this.heic,
             metadata: this.metadata,
+            progressive: true,
+            onScanProgress,
             reconnect: () => AfcDevice.attach(udid),
             // Locked, unplugged or untrusted now. Reopening puts the phone
             // back through the registry, which shows why and retries.
@@ -253,6 +255,7 @@ export class GalleryService {
         }
       },
       close: (s) => s.close(),
+      onReady: (s, changed) => { void s.finishIndexing(changed) },
       nameOf: (s) => s.name,
       // Both kinds of phone. One failing (Apple's service not installed, say)
       // must not hide the other.
@@ -264,7 +267,7 @@ export class GalleryService {
     })
   }
 
-  private async openAndroid(id: string): Promise<PhoneSession> {
+  private async openAndroid(id: string, onScanProgress: (checked: number) => void): Promise<PhoneSession> {
     const device = await this.android.attach(id)
     try {
       return await PhoneSession.open({
@@ -272,11 +275,14 @@ export class GalleryService {
         udid: id,
         name: (await device.identity()).name,
         platform: 'android',
+        progressive: true,
+        openIndexDevice: () => this.android.attach(id),
         cacheRoot: path.join(this.deps.userData, 'phones'),
         heic: this.heic,
         metadata: this.metadata,
         reconnect: () => this.android.attach(id),
         onLost: () => void this.registry.reopen(id),
+        onScanProgress,
       })
     } catch (e) {
       await device.dispose().catch(() => {})
@@ -310,6 +316,7 @@ export class GalleryService {
       this.forgetPhonePrivate()
       this.publish(true)
     })
+    this.registry.on('progress', () => this.publish())
     this.watcher.on('change', () => this.publish())
     this.registry.start()
     this.watcher.start()
@@ -350,6 +357,9 @@ export class GalleryService {
       state: d.state,
       error: d.error,
       count: d.session ? d.session.library.assets.length : null,
+      scanChecked: d.scanChecked,
+      indexing: d.session?.indexing,
+      indexError: d.session?.indexError,
     }))
     const anyReady = devices.some((d) => d.state === 'ready')
     return {
@@ -627,7 +637,7 @@ export class GalleryService {
     return this.phone(source).collections()
   }
 
-  async items(source: SourceId, collection: string): Promise<GalleryItem[]> {
+  async items(source: SourceId, collection: string, page?: { fromEnd: number; limit: number }): Promise<GalleryItem[]> {
     const v = this.vaults.get(source)
     const query = searchQueryOf(collection)
     if (query !== null) return v ? this.search(v, query) : []
@@ -641,7 +651,7 @@ export class GalleryService {
     // Strip the phone-only fields; the window needs only the tile.
     const s = this.phone(source)
     return s
-      .items(collection)
+      .itemPage(collection, page)
       .map(({ key, kind, t, off, w, h, dur, fav, edited, cloud, subtype, deletedAt, burstId }) => ({
         frames: kind === 'burst' && burstId ? s.library.bursts.get(burstId)?.length : undefined,
         key,
@@ -1390,7 +1400,7 @@ export class GalleryService {
   /** Reconnecting a phone or opening a vault can supply names old imports lack. */
   private backfillPlaces() {
     for (const device of this.registry.devices) {
-      if (device.state !== 'ready' || !device.session) continue
+      if (device.state !== 'ready' || !device.session || device.session.indexing) continue
       const session = device.session
       let checked = this.placesChecked.get(session)
       if (!checked) {
@@ -2084,6 +2094,14 @@ export class GalleryService {
   async retryDevice(id: SourceId) {
     await this.registry.reopen(id.replace(/^device:/, ''))
     await this.watcher.refresh()
+  }
+
+  async openAppleDevices() {
+    try {
+      await this.deps.openExternal('ms-windows-store://pdp/?ProductId=9NP83LWLPZ9K')
+    } catch {
+      await this.deps.openExternal('https://apps.microsoft.com/detail/9np83lwlpz9k')
+    }
   }
 
   private phone(source: SourceId): PhoneSession {

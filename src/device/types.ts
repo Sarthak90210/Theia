@@ -52,7 +52,7 @@ export interface DeviceSource {
    * phones answer this, because over MTP a round trip per file takes minutes
    * for a big camera roll. Without it, scanMedia walks with list and stat.
    */
-  scan?(request: ScanRequest): Promise<ScanResult>
+  scan?(request: ScanRequest, onProgress?: (checked: number) => void): Promise<ScanResult>
   /** Optional: the device's own small preview of a file, or null when it has none. */
   thumbnail?(path: string): Promise<Buffer | null>
 }

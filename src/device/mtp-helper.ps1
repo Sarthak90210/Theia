@@ -2,7 +2,8 @@
 #
 # One long-lived process per connection. Requests arrive on stdin, one JSON
 # object per line. Each reply is one JSON header line on stdout, followed by
-# exactly `bytes` raw bytes when the reply carries file data. Requests run one
+# exactly `bytes` raw bytes when the reply carries file data. A scan can also
+# send progress lines with the same id before its final reply. Requests run one
 # at a time, in order.
 #
 # Reads go through the Windows IStream underneath MediaDevices' wrapper: the
@@ -40,6 +41,8 @@ public static class TheiaMtp {
   static readonly Dictionary<string, Dictionary<string, MediaFileSystemInfo>> children = new Dictionary<string, Dictionary<string, MediaFileSystemInfo>>(StringComparer.Ordinal);
   static readonly Dictionary<int, OpenFile> files = new Dictionary<int, OpenFile>();
   static int nextHandle = 1;
+  static object scanId;
+  static int scannedEntries;
   static readonly FieldInfo innerStream = typeof(MediaDevice).Assembly.GetType("MediaDevices.Internal.StreamWrapper")
     .GetField("stream", BindingFlags.Instance | BindingFlags.NonPublic);
 
@@ -64,6 +67,7 @@ public static class TheiaMtp {
         id = req.ContainsKey("id") ? req["id"] : null;
         string op = Str(req, "op");
         if (op == "exit") { Reply(id, true, null, null, null, null); break; }
+        if (op == "scan") { scanId = id; scannedEntries = 0; }
         byte[] data = null;
         object result = Dispatch(op, req, ref data);
         Reply(id, true, result, null, null, data);
@@ -72,6 +76,8 @@ public static class TheiaMtp {
         while (ex is TargetInvocationException && ex.InnerException != null) ex = ex.InnerException;
         string code = CodeOf(ex);
         Reply(id, false, null, code == "not-found" && !(ex is TheiaMtpError) ? "object not found: " + ex.Message : ex.Message, code, null);
+      } finally {
+        scanId = null;
       }
     }
     Shutdown();
@@ -179,6 +185,12 @@ public static class TheiaMtp {
     if (folder == null) throw new TheiaMtpError("not-found", "object not found: " + dir + " is not a folder");
     kids = new Dictionary<string, MediaFileSystemInfo>(StringComparer.Ordinal);
     foreach (var entry in folder.EnumerateFileSystemInfos()) {
+      if (scanId != null && ++scannedEntries % 250 == 0) {
+        var progress = new Dictionary<string, object> { { "id", scanId }, { "progress", scannedEntries }, { "bytes", 0 } };
+        var line = Encoding.UTF8.GetBytes(json.Serialize(progress) + "\n");
+        output.Write(line, 0, line.Length);
+        output.Flush();
+      }
       if (string.IsNullOrEmpty(entry.Name) || entry.Name.IndexOf('/') >= 0) continue;
       kids[entry.Name] = entry;
       nodes[dir + "/" + entry.Name] = entry;

@@ -947,6 +947,21 @@ button.link:hover {
 .diag-head p {
   margin-top: 4px;
 }
+.diag-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.phone-loading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.phone-loading .spinner {
+  width: 12px;
+  height: 12px;
+  border-width: 1px;
+}
 .fix {
   margin: 0;
   padding: 10px 14px 10px 32px;

@@ -9,6 +9,7 @@ import * as I from './icons.tsx'
  */
 export function DiagnosisView({ device, diagnosis }: { device: DeviceInfo | null; diagnosis: Diagnosis | null }) {
   const [busy, setBusy] = useState(false)
+  const [storeError, setStoreError] = useState(false)
   const failed = diagnosis?.layers.find((l) => l.status === 'fail') ?? null
 
   const retry = async () => {
@@ -17,6 +18,15 @@ export function DiagnosisView({ device, diagnosis }: { device: DeviceInfo | null
       await window.photos.retryDevice(device?.id ?? 'device:')
     } finally {
       setBusy(false)
+    }
+  }
+
+  const openAppleDevices = async () => {
+    setStoreError(false)
+    try {
+      await window.photos.openAppleDevices()
+    } catch {
+      setStoreError(true)
     }
   }
 
@@ -64,9 +74,17 @@ export function DiagnosisView({ device, diagnosis }: { device: DeviceInfo | null
           </ul>
         )}
 
-        <button className="primary" onClick={() => void retry()} disabled={busy}>
-          {busy ? 'Checking…' : 'Check again'}
-        </button>
+        <div className="diag-actions">
+          {failed?.id === 'service' && (
+            <button className="primary" onClick={() => void openAppleDevices()}>Install Apple Devices</button>
+          )}
+          <button className={failed?.id === 'service' ? 'ghost' : 'primary'} onClick={() => void retry()} disabled={busy}>
+            {busy ? 'Checking…' : 'Check again'}
+          </button>
+        </div>
+        {failed?.id === 'service' && storeError && (
+          <p role="alert">Couldn't open the listing. Search for Apple Devices in the Microsoft Store.</p>
+        )}
       </div>
     </div>
   )

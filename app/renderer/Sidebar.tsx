@@ -38,8 +38,10 @@ export interface SidebarProps {
  * here by themselves when plugged in and go when unplugged.
  */
 export function Sidebar({ state, source, collections, collection, onSource, onCollection, onOpenVault, onAddFolderToVault, onVaultOptions, onSettings, onShortcuts, onError }: SidebarProps) {
-  const noPhoneButSeen =
-    state.devices.length === 0 && state.diagnosis && state.diagnosis.layers.some((l) => l.id === 'usb' && l.status === 'ok')
+  const needsAppleSetup = state.diagnosis?.layers.some((l) => l.id === 'service' && l.status === 'fail')
+  const showIphoneHelp = state.devices.length === 0 && (
+    needsAppleSetup || state.diagnosis?.layers.some((l) => l.id === 'usb' && l.status === 'ok')
+  )
 
   return (
     <nav className="sidebar" aria-label="Sources">
@@ -61,14 +63,14 @@ export function Sidebar({ state, source, collections, collection, onSource, onCo
             {d.state === 'problem' && <I.Warning size={14} className="side-warn" />}
           </button>
         ))}
-        {noPhoneButSeen && (
+        {showIphoneHelp && (
           <button className={`side-item ${source === 'diagnosis' ? 'active' : ''}`} onClick={() => onSource('diagnosis')}>
             <I.Phone />
-            <span className="side-label">iPhone</span>
+            <span className="side-label">{needsAppleSetup ? 'iPhone setup' : 'iPhone'}</span>
             <I.Warning size={14} className="side-warn" />
           </button>
         )}
-        {state.devices.length === 0 && !noPhoneButSeen && <div className="side-empty">Plug in an iPhone or Android phone</div>}
+        {state.devices.length === 0 && !showIphoneHelp && <div className="side-empty">Plug in an iPhone or Android phone</div>}
       </div>
 
       <div className="side-section">

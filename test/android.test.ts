@@ -102,10 +102,21 @@ describe('an Android library from its folders', () => {
     expect(androidKey({ path: a.path, size: 101 })).not.toBe(a.key)
   })
 
-  it('shows no Hidden or Recently Deleted, which Android phones do not share', () => {
-    const c = phoneCollections(readAndroidLibrary(files))
-    expect(c.smart.map((x) => x.id)).toEqual(['library', 'videos', 'screenshots'])
-    expect(phoneItems(readAndroidLibrary(files), 'videos')).toHaveLength(2)
+  it('uses the same collection and album contract as iPhone without inventing private albums', () => {
+    const lib = readAndroidLibrary(files)
+    const c = phoneCollections(lib)
+    expect(c.smart.map(({ id, name, kind, count }) => ({ id, name, kind, count }))).toEqual([
+      { id: 'library', name: 'Library', kind: 'smart', count: 6 },
+      { id: 'videos', name: 'Videos', kind: 'smart', count: 2 },
+      { id: 'screenshots', name: 'Screenshots', kind: 'smart', count: 1 },
+    ])
+    for (const collection of [...c.smart, ...c.albums]) {
+      const members = phoneItems(lib, collection.id)
+      expect(members).toHaveLength(collection.count)
+      expect(members.at(-1)?.key).toBe(collection.cover)
+    }
+    expect(c.albums.map((a) => a.kind)).toEqual(lib.albums.map(() => 'album'))
+    expect(c.albums.reduce((total, a) => total + a.count, 0)).toBe(lib.assets.length)
   })
 })
 
@@ -182,6 +193,35 @@ describe('an Android phone session', () => {
     expect(items[0]!.sourceUuid).toBe(first.key)
   })
 
+  it('opens the camera roll before scanning other folders, without blocking original reads', async () => {
+    const root = path.join(s.dir, 'phone')
+    const jpeg = await phoneOnDisk(root)
+    let releaseScan!: () => void
+    const blocked = new Promise<void>(resolve => { releaseScan = resolve })
+    const background = new FakeDevice({ root })
+    const indexDevice = Object.assign(background, {
+      scan: async (request: ScanRequest) => {
+        expect(request.roots).not.toContain('DCIM')
+        await blocked
+        return scanMedia(new FakeDevice({ root }), request)
+      },
+    })
+    const session = await open(new FakeDevice({ root }), { progressive: true, openIndexDevice: async () => indexDevice })
+    expect(session.indexing).toBe(true)
+    expect(session.collections().albums.map(a => a.name)).toEqual(['Camera'])
+    const changes: boolean[] = []
+    const finish = session.finishIndexing(() => changes.push(session.indexing))
+    const newest = session.itemPage('library', { fromEnd: 0, limit: 1 })[0]!
+    expect(newest.filename).toBe('IMG_20240502_101500.jpg')
+    expect(fs.readFileSync((await session.original(newest.key))!)).toEqual(jpeg)
+    expect(session.itemPage('library', { fromEnd: 1, limit: 1 })[0]?.filename).toBe('IMG_20240501_101500.jpg')
+    releaseScan()
+    await finish
+    expect(changes).toEqual([false])
+    expect(session.library.assets).toHaveLength(4)
+    expect(session.collections().albums.map(a => a.name)).toContain('Screenshots')
+  })
+
   it("uses the phone's own preview for the placeholder", async () => {
     const root = path.join(s.dir, 'phone')
     await phoneOnDisk(root)
@@ -221,6 +261,7 @@ class FakeHelper extends EventEmitter implements BridgeProcess {
   devices: WpdDeviceEntry[] = []
   /** False is how a locked phone, or one not set to File transfer, looks. */
   storages = () => true
+  scanProgress: number[] = []
   /** Split every reply into pieces this big. */
   chunk = 7
   private readonly handles = new Map<number, { data: Buffer; pos: number }>()
@@ -258,7 +299,9 @@ class FakeHelper extends EventEmitter implements BridgeProcess {
       switch (req.op) {
         case 'devices': return reply(this.devices)
         case 'open': return reply({ name: 'Pixel 9', model: 'Pixel 9', manufacturer: 'Google', serial: 'X', firmware: '15', storages: this.storages() ? ['Internal shared storage'] : [] })
-        case 'scan': return void scanMedia(new FakeDevice({ root: this.root }), req as unknown as ScanRequest).then(reply)
+        case 'scan':
+          for (const progress of this.scanProgress) this.send({ id: req.id, progress, bytes: 0 })
+          return void scanMedia(new FakeDevice({ root: this.root }), req as unknown as ScanRequest).then(reply)
         case 'stat': {
           const st = fs.statSync(this.file(String(req.path)))
           return reply({ size: st.size, mtimeMs: st.mtimeMs, isDirectory: st.isDirectory() })
@@ -295,6 +338,22 @@ class FakeHelper extends EventEmitter implements BridgeProcess {
 }
 
 describe('the bridge to the Windows helper', () => {
+  it('delivers scan progress without treating it as the final reply', async () => {
+    const root = path.join(s.dir, 'phone')
+    await phoneOnDisk(root)
+    const helper = new FakeHelper(root)
+    helper.scanProgress = [250, 500]
+    const bridge = new MtpBridge(helper)
+    const checkpoints: number[] = []
+    try {
+      const result = await bridge.call<{ files: unknown[] }>('scan', { ...ANDROID_SCAN }, n => checkpoints.push(n))
+      expect(checkpoints).toEqual([250, 500])
+      expect(result.files).toHaveLength(4)
+    } finally {
+      await bridge.close()
+    }
+  })
+
   it('reassembles headers and file bytes however the pipe splits them', async () => {
     const root = path.join(s.dir, 'phone')
     const jpeg = await phoneOnDisk(root)

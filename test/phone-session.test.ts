@@ -110,6 +110,27 @@ async function phone(count = 2) {
 const noHeic = { decode: async () => ({ width: 640, height: 480, data: Buffer.alloc(640 * 480 * 4, 255) }) }
 
 describe('phone session', () => {
+  it('shows recent iPhone items first without calling unchecked originals cloud-only', async () => {
+    const fake = await phone()
+    const dcim = path.join(s.deviceRoot, 'DCIM')
+    for (const folder of ['101APPLE', '102APPLE', '103APPLE']) fs.mkdirSync(path.join(dcim, folder))
+    fs.renameSync(path.join(dcim, '100APPLE', 'IMG_0002.HEIC'), path.join(dcim, '103APPLE', 'IMG_0002.HEIC'))
+    const db = new Database(path.join(s.deviceRoot, 'PhotoData', 'Photos.sqlite'))
+    db.prepare("UPDATE ZASSET SET ZDIRECTORY = 'DCIM/103APPLE' WHERE ZUUID = 'U2'").run()
+    db.close()
+    const session = await open({ device: fake, udid: 'U', name: 'Fake', cacheRoot: path.join(s.dir, 'cache'), heic: noHeic, progressive: true })
+    expect(session.indexing).toBe(true)
+    expect(session.items('library').map(a => a.key)).toEqual(['U2'])
+    expect(session.asset('U2')?.cloud).toBe(false)
+    expect(session.asset('U1')).toBeUndefined()
+    await session.finishIndexing(() => {})
+    expect(session.indexing).toBe(false)
+    expect(session.items('library').map(a => [a.key, a.cloud])).toEqual([['U1', false], ['U2', false]])
+    expect(session.itemPage('library', { fromEnd: 0, limit: 1 }).map(a => a.key)).toEqual(['U2'])
+    expect(session.itemPage('library', { fromEnd: 1, limit: 1 }).map(a => a.key)).toEqual(['U1'])
+    expect(session.itemPage('library', { fromEnd: 2, limit: 1 })).toEqual([])
+  })
+
   it('builds grid thumbnails from the original instead of the tiny phone preview', async () => {
     const fake = await phone(1)
     const session = await open({ device: fake, udid: 'U', name: 'Fake', cacheRoot: path.join(s.dir, 'cache'), heic: noHeic })

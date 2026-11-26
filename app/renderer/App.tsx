@@ -153,6 +153,10 @@ export function App() {
   const device = state?.devices.find((d) => d.id === source) ?? null
   const vault = state?.vaults.find((v) => v.id === source) ?? null
   const ready = !!vault || device?.state === 'ready'
+  const isPhone = !!device
+  const [pagingPhone, setPagingPhone] = useState(false)
+  const phoneLoading = isPhone && (pagingPhone || !!device?.indexing)
+  const partialPhone = phoneLoading || !!device?.indexError
   // Reload when the source's contents change, such as after a save into it.
   const sourceRevision = vault?.revision ?? 0
   // The count climbs with every item a save adds. Reloading the whole list on
@@ -212,30 +216,51 @@ export function App() {
     return () => {
       live = false
     }
-  }, [source, ready, sourceCount, sourceRevision, refresh, state?.search.peopleRevision])
+  }, [source, ready, sourceCount, sourceRevision, refresh, state?.search.peopleRevision, device?.indexing])
 
   useEffect(() => {
     if (!source || !ready) return
     let live = true
     setLoadError(null)
-    window.photos
-      .items(source, collection)
-      .then((list) => {
-        if (!live) return
-        setItems((prev) => reuseItems(prev, list))
-        setViewerKey(key => key && list.some(it => it.key === key) ? key : null)
-        // Drop selected items that are gone.
-        setSelected((s) => {
-          if (!s.size) return s
-          const keys = new Set(list.map((i) => i.key))
-          return new Set([...s].filter((k) => keys.has(k)))
-        })
+    setPagingPhone(isPhone)
+    async function loadItems(id: SourceId) {
+      let list: GalleryItem[]
+      if (isPhone) {
+        // Start near the newest end. Originals and thumbnails are still read
+        // on demand by the virtual grid, never by this catalogue request.
+        list = []
+        for (;;) {
+          const limit = list.length ? 2048 : 256
+          const page = await window.photos.items(id, collection, { fromEnd: list.length, limit })
+          if (!live) return
+          list = [...page, ...list]
+          const batch = list
+          // On a rescan keep existing tiles until the new list catches up.
+          setItems(prev => prev && prev.length > batch.length ? prev : reuseItems(prev, batch))
+          if (page.length < limit) break
+          await new Promise<void>(resolve => setTimeout(resolve, 24))
+          if (!live) return
+        }
+      } else {
+        list = await window.photos.items(id, collection)
+      }
+      if (!live) return
+      setItems((prev) => reuseItems(prev, list))
+      setViewerKey(key => key && list.some(it => it.key === key) ? key : null)
+      // Drop selected items that are gone.
+      setSelected((s) => {
+        if (!s.size) return s
+        const keys = new Set(list.map((i) => i.key))
+        return new Set([...s].filter((k) => keys.has(k)))
       })
+    }
+    void loadItems(source)
       .catch((e: Error) => live && setLoadError(cleanError(e.message)))
+      .finally(() => { if (live) setPagingPhone(false) })
     return () => {
       live = false
     }
-  }, [source, ready, collection, sourceCount, sourceRevision, refresh, personId === null ? 0 : state?.search.peopleRevision])
+  }, [source, ready, collection, sourceCount, sourceRevision, refresh, personId === null ? 0 : state?.search.peopleRevision, isPhone, device?.indexing])
 
   useEffect(() => {
     if (!source || personId === null) { setPerson(null); return }
@@ -438,10 +463,13 @@ export function App() {
     )
   } else if (device?.state === 'opening') {
     body = (
-      <div className="empty">
+      <div className="empty" role="status" aria-live="polite">
         <span className="spinner" />
         <h2>Reading {device.name}</h2>
         <p className="muted">Loading the phone's library. Keep the phone unlocked.</p>
+        <p className="muted">{device.scanChecked
+          ? `${device.scanChecked.toLocaleString()} files and folders checked`
+          : 'Scanning over USB. Large libraries can take a few minutes.'}</p>
       </div>
     )
   } else if (vault && privateCollection && vault.protection !== 'unlocked') {
@@ -475,7 +503,7 @@ export function App() {
         <p className="muted">{loadError}</p>
       </div>
     )
-  } else if (!items) {
+  } else if (!items || (phoneLoading && !items.length)) {
     body = <div className="grid-skeleton" role="status" aria-label="Loading photos">{Array.from({ length: 18 }, (_, i) => <span key={i} />)}</div>
   } else if (!items.length && searchQuery !== null) {
     const indexing = state.search.indexing && vault && state.search.indexing.vault === vault.name ? state.search.indexing : null
@@ -506,7 +534,7 @@ export function App() {
     body = (
       <Grid
         // A new search starts at its best match, at the top.
-        key={searchQuery !== null || personId !== null ? collection : 'grid'}
+        key={isPhone ? `${source}/${collection}` : searchQuery !== null || personId !== null ? collection : 'grid'}
         source={source}
         items={items}
         view={timeViews ? view : 'all'}
@@ -515,7 +543,8 @@ export function App() {
         scrollTo={scrollTo}
         onSelect={onSelect}
         onSelectRange={selectRange}
-        onSelectAll={() => setSelected(new Set(keysAll))}
+        onSelectAll={() => partialPhone ? setNotice('The full phone library must be loaded to select all.') : setSelected(new Set(keysAll))}
+        preserveAnchor={isPhone}
         onClear={stopSelecting}
         onOpen={(i) => setViewer(i)}
         onDrill={drill}
@@ -659,12 +688,14 @@ export function App() {
                 {searchQuery !== null && state.search.indexing && state.search.indexing.vault === vault?.name &&
                   ` · still reading photos for search, ${count(state.search.indexing.done)} of ${count(state.search.indexing.total)}`}
               </div>
+              {phoneLoading && <div className="phone-loading muted small" role="status"><span className="spinner" aria-hidden="true" />Still loading files from {device?.name}…</div>}
+              {device?.indexError && <div className="muted small" role="alert">Some folders couldn’t be read. Use Refresh phone to try again.</div>}
             </div>
             <Glass className="glass-group toolbar-actions">
               {device && <button className="ghost icon" aria-label="Refresh phone" title="Refresh phone" onClick={() => void window.photos.retryDevice(source!).then(() => setRefresh(n => n + 1)).catch(e => showError(e.message))}><I.Refresh /></button>}
               {vault && privateCollection && vault.protection !== 'unlocked' ? null : selecting ? (
                 <>
-                  <button className="ghost" onClick={() => (allSelected ? clearSelection() : setSelected(new Set(keysAll)))}>
+                  <button className="ghost" disabled={partialPhone && !allSelected} onClick={() => (allSelected ? clearSelection() : setSelected(new Set(keysAll)))}>
                     {allSelected ? 'Deselect All' : 'Select All'}
                   </button>
                   <button className="ghost select-toggle on" onClick={stopSelecting} title="Stop selecting (Esc)">
@@ -683,7 +714,7 @@ export function App() {
                   <button className="ghost select-toggle" onClick={() => setSelecting(true)} title="Select photos and videos">
                     Select
                   </button>
-                  <SaveMenu state={state} source={source!} keys={saveKeys} label={saveLabel} primary onError={showError} />
+                  <SaveMenu state={state} source={source!} keys={partialPhone && !selected.size ? [] : saveKeys} label={saveLabel} primary onError={showError} />
                 </>
               )}
               {vault && privateCollection && vault.protection === 'unlocked' && (

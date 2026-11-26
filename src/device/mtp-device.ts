@@ -94,8 +94,8 @@ export class MtpDevice implements DeviceSource {
     return new MtpHandle(this.bridge, handle)
   }
 
-  async scan(request: ScanRequest): Promise<ScanResult> {
-    return this.call<ScanResult>('scan', { ...request })
+  async scan(request: ScanRequest, onProgress?: (checked: number) => void): Promise<ScanResult> {
+    return this.bridge.call<ScanResult>('scan', { ...request }, onProgress)
   }
 
   async thumbnail(path: string): Promise<Buffer | null> {
