@@ -20,13 +20,15 @@ export interface DeviceEntry<S> {
   session: S | null
   name: string | null
   error: string | null
+  scanChecked?: number
   since: number
 }
 
 export interface RegistryOptions<S> {
   /** Open a browsing session for one phone. Throws when it cannot yet. */
-  open: (udid: string) => Promise<S>
+  open: (udid: string, onScanProgress: (checked: number) => void) => Promise<S>
   close: (session: S) => Promise<void>
+  onReady?: (session: S, onChange: () => void) => void
   nameOf: (session: S) => string
   /** The USB-connected phones usbmuxd can see right now. */
   list?: () => Promise<string[]>
@@ -118,12 +120,21 @@ export class DeviceRegistry<S> extends EventEmitter {
     })
     this.emit('change')
     try {
-      const session = await this.opts.open(udid)
+      const session = await this.opts.open(udid, (checked) => {
+        const entry = this.entries.get(udid)
+        if (!entry || entry.state === 'problem' || checked <= (entry.scanChecked ?? 0)) return
+        entry.scanChecked = checked
+        this.emit('progress')
+      })
       if (this.stopped || !this.entries.has(udid)) {
         await this.opts.close(session).catch(() => {})
         return
       }
-      this.entries.set(udid, { udid, state: 'ready', session, name: this.opts.nameOf(session), error: null, since: Date.now() })
+      this.entries.set(udid, { udid, state: 'ready', session, name: this.opts.nameOf(session), error: null,
+        since: Date.now(), scanChecked: this.entries.get(udid)?.scanChecked })
+      this.opts.onReady?.(session, () => {
+        if (this.entries.get(udid)?.session === session) this.emit('change')
+      })
     } catch (e) {
       if (this.entries.has(udid)) {
         this.entries.set(udid, {

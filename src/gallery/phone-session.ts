@@ -16,7 +16,8 @@ import {
   type PhoneExtras,
   type PhoneLibrary,
 } from './phone-library.ts'
-import { readAndroidLibrary, scanMedia } from './android-library.ts'
+import { ANDROID_SCAN, readAndroidLibrary, scanMedia } from './android-library.ts'
+import type { ScanResult } from '../device/types.ts'
 import type { Collections, ItemDetail, ItemFile } from './types.ts'
 
 sharp.cache(false)
@@ -62,6 +63,11 @@ export interface PhoneSessionOptions {
   reconnect?: () => Promise<DeviceSource>
   /** Reconnecting failed: the phone is locked, unplugged or untrusted now. */
   onLost?: (e: Error) => void
+  /** Android scan progress counts inspected entries, not just usable media. */
+  onScanProgress?: (checked: number) => void
+  /** The interactive browser can publish a partial catalogue, then finish in the background. */
+  progressive?: boolean
+  openIndexDevice?: () => Promise<DeviceSource>
 }
 
 /** The connection to the phone is gone and a new one could not be made. */
@@ -85,6 +91,14 @@ export class PhoneSession {
   readonly name: string
   readonly platform: PhonePlatform
   library!: PhoneLibrary
+  indexing = false
+  indexError = false
+  private pendingIndex: (() => Promise<void>) | null = null
+  private indexTask: Promise<void> | null = null
+  private indexDevice: DeviceSource | null = null
+  private closed = false
+  private itemCache: { collection: string; items: PhoneAsset[] } | null = null
+  private privateInventory: PhoneLibrary | null = null
   /** Every file in /DCIM by directory, lower-cased names, for "is it on the phone" and siblings. */
   private dcim = new Map<string, string[]>()
   private readonly dir: string
@@ -110,14 +124,31 @@ export class PhoneSession {
 
   static async open(opts: PhoneSessionOptions): Promise<PhoneSession> {
     const s = new PhoneSession(opts)
-    await s.load()
+    await s.loadLibrary(!!opts.progressive)
     return s
   }
 
-  /** Copy the Photos database and list /DCIM. A few seconds for thousands of photos. */
+  /** A fresh, complete inventory for workflows that need a consistent snapshot. */
   async load(): Promise<void> {
+    await this.indexTask
+    await this.loadLibrary(false)
+  }
+
+  finishIndexing(changed: () => void): Promise<void> {
+    if (!this.pendingIndex || this.closed) return this.indexTask ?? Promise.resolve()
+    const work = this.pendingIndex
+    this.pendingIndex = null
+    this.indexTask = work().catch(() => { this.indexError = !this.closed }).finally(() => {
+      this.indexing = false
+      this.indexTask = null
+      if (!this.closed) changed()
+    })
+    return this.indexTask
+  }
+
+  private async loadLibrary(progressive: boolean): Promise<void> {
     fs.mkdirSync(this.dir, { recursive: true })
-    if (this.platform === 'android') return this.loadAndroid()
+    if (this.platform === 'android') return this.loadAndroid(progressive)
     // The copy in use stays open, and Windows refuses to delete an open file.
     // Each load gets a fresh folder; older ones go once nothing holds them.
     const dbDir = fs.mkdtempSync(path.join(this.dir, 'db-'))
@@ -132,16 +163,43 @@ export class PhoneSession {
       }
 
       const dcim = new Map<string, string[]>()
-      for (const album of await this.io((d) => d.list('/DCIM'))) {
-        if (album.startsWith('.')) continue
+      const folders = (await this.io((d) => d.list('/DCIM'))).filter(a => !a.startsWith('.')).sort().reverse()
+      let checked = 0
+      const listFolder = async (album: string) => {
         const dir = `/DCIM/${album}`
-        dcim.set(dir, await this.io((d) => d.list(dir)))
+        const names = await this.io((d) => d.list(dir))
+        dcim.set(dir, names)
+        checked += names.length
+        this.opts.onScanProgress?.(checked)
       }
+      const initial = progressive ? folders.slice(0, 3) : folders
+      for (const album of initial) await listFolder(album)
 
       const library = readPhoneLibrary(local, (p) => onDcim(dcim, p))
       next = new Database(local, { readonly: true, fileMustExist: true })
       this.dcim = dcim
-      this.library = library
+      const remaining = folders.slice(initial.length)
+      const partial = remaining.length ? knownPhoneLibrary(library, dcim) : null
+      if (partial?.byKey.size) {
+        this.setLibrary(partial)
+        // The Photos DB knows every private key before its directory is read.
+        // Use that complete inventory for clearing any old cached copies.
+        this.privateInventory = library
+        this.deferIndex(async () => {
+          for (const album of remaining) {
+            if (this.closed) return
+            await listFolder(album)
+          }
+          if (this.closed) return
+          for (const asset of library.byKey.values()) asset.cloud = !onDcim(dcim, asset.path)
+          this.setLibrary(library)
+          this.privateInventory = null
+        })
+      } else {
+        for (const album of remaining) await listFolder(album)
+        if (remaining.length) for (const asset of library.byKey.values()) asset.cloud = !onDcim(dcim, asset.path)
+        this.setLibrary(library)
+      }
     } catch (e) {
       next?.close()
       removeQuietly(dbDir)
@@ -155,9 +213,51 @@ export class PhoneSession {
     }
   }
 
-  /** List the phone's photo folders. Seconds for thousands of files; the phone does the work. */
-  private async loadAndroid(): Promise<void> {
-    const scan = await this.io((d) => scanMedia(d))
+  /** Show Camera first, then add other folders over a separate MTP connection. */
+  private async loadAndroid(progressive: boolean): Promise<void> {
+    if (progressive && this.opts.openIndexDevice) {
+      const first = await this.io((d) => scanMedia(d, { ...ANDROID_SCAN, roots: ['DCIM'] }, this.opts.onScanProgress))
+      if (first.files.length) {
+        this.useAndroidScan(first)
+        this.deferIndex(async () => {
+          const index = await this.opts.openIndexDevice!()
+          if (this.closed) {
+            await index.dispose().catch(() => {})
+            return
+          }
+          this.indexDevice = index
+          try {
+            const more = await scanMedia(index, { ...ANDROID_SCAN, roots: ANDROID_SCAN.roots.filter(r => r !== 'DCIM') },
+              n => this.opts.onScanProgress?.(first.files.length + n))
+            if (this.closed) return
+            if (!more.storages.length) throw new Error('The phone stopped sharing its storage.')
+            this.useAndroidScan({ ...more, folders: first.folders + more.folders, files: [...first.files, ...more.files] })
+          } finally {
+            if (this.indexDevice === index) {
+              this.indexDevice = null
+              await index.dispose().catch(() => {})
+            }
+          }
+        })
+        return
+      }
+    }
+    this.useAndroidScan(await this.io((d) => scanMedia(d, undefined, this.opts.onScanProgress)))
+  }
+
+  private deferIndex(work: () => Promise<void>) {
+    this.pendingIndex = work
+    this.indexing = true
+    this.indexError = false
+  }
+
+  private setLibrary(library: PhoneLibrary) {
+    this.library = library
+    this.privateKeys = null
+    this.itemCache = null
+  }
+
+  private useAndroidScan(scan: ScanResult) {
     if (!scan.storages.length) {
       throw new Error("The phone isn't sharing its files. Unlock it, then tap the USB notification and choose File transfer.")
     }
@@ -170,9 +270,8 @@ export class PhoneSession {
       dirs.set(dir, names)
       this.sizes.set(f.path, f.size)
     }
-    this.library = readAndroidLibrary(scan.files)
+    this.setLibrary(readAndroidLibrary(scan.files))
     this.dcim = dirs
-    this.privateKeys = null
   }
 
   onPhone(devicePath: string): boolean {
@@ -184,7 +283,18 @@ export class PhoneSession {
   }
 
   items(collectionId: string): PhoneAsset[] {
-    return phoneItems(this.library, collectionId)
+    if (this.itemCache?.collection === collectionId) return this.itemCache.items
+    const items = phoneItems(this.library, collectionId)
+    this.itemCache = { collection: collectionId, items }
+    return items
+  }
+
+  itemPage(collectionId: string, page?: { fromEnd: number; limit: number }): PhoneAsset[] {
+    const items = this.items(collectionId)
+    if (!page) return items
+    const end = Math.max(0, items.length - (Number.isSafeInteger(page.fromEnd) ? Math.max(0, page.fromEnd) : 0))
+    const limit = Number.isSafeInteger(page.limit) ? Math.max(1, Math.min(2048, page.limit)) : 2048
+    return items.slice(Math.max(0, end - limit), end)
   }
 
   asset(key: string): PhoneAsset | undefined {
@@ -295,12 +405,28 @@ export class PhoneSession {
         else if (match(e.name)) rm(p)
       }
     }
-    const keys = [...this.library.hidden, ...this.library.deleted]
+    const inventory = this.privateInventory ?? this.library
+    const keys = [...inventory.hidden, ...inventory.deleted]
     const ids = new Set(keys.map((k) => safe(k)))
     const names = new Set(keys.flatMap((k) => this.filesFor(k).map((p) => path.posix.basename(p))))
+    const originals = new Map<string, Set<string>>()
+    for (const key of keys) {
+      const asset = inventory.byKey.get(key)
+      if (!asset) continue
+      const folder = path.posix.dirname(asset.path).replace(/^\/+/, '').replace(/[\\/]/g, '_')
+      const stems = originals.get(folder) ?? new Set<string>()
+      const stem = path.posix.parse(asset.filename).name.toLowerCase()
+      stems.add(stem)
+      const edited = /^([a-z]+_)(\d+)$/.exec(stem)
+      if (edited) stems.add(`${edited[1]}e${edited[2]}`)
+      originals.set(folder, stems)
+    }
     walk(path.join(this.dir, 'thumbs'), (name) => ids.has(name.replace(/-(sm|lg|ph)\.webp$/, '')))
     walk(path.join(this.dir, 'rendered'), (name) => [...ids].some((id) => name.includes(id)))
     walk(path.join(this.dir, 'originals'), (name) => names.has(name))
+    for (const [folder, stems] of originals) {
+      walk(path.join(this.dir, 'originals', folder), (name) => stems.has(path.parse(name).name.toLowerCase()))
+    }
     walk(path.join(this.dir, 'video'), (name) => [...ids].some((id) => name.startsWith(id)))
     return n
   }
@@ -462,9 +588,13 @@ export class PhoneSession {
   }
 
   async close(): Promise<void> {
+    this.closed = true
+    const index = this.indexDevice
+    this.indexDevice = null
+    this.pendingIndex = null
     this.db?.close()
     this.db = null
-    await this.device.dispose().catch(() => {})
+    await Promise.all([index, this.device].map(d => d?.dispose().catch(() => {})))
   }
 
   /**
@@ -501,15 +631,20 @@ export class PhoneSession {
   }
 
   private async replace(failed: DeviceSource): Promise<void> {
+    if (this.closed) throw new PhoneLostError('The phone session is closed.')
     if (this.device !== failed) return // another request already reconnected
     if (!this.reconnecting) {
       this.reconnecting = (async () => {
         try {
           const next = await this.opts.reconnect!()
+          if (this.closed) {
+            await next.dispose().catch(() => {})
+            throw new PhoneLostError('The phone session is closed.')
+          }
           this.device = next
           await failed.dispose().catch(() => {})
         } catch (e) {
-          this.opts.onLost?.(e as Error)
+          if (!this.closed) this.opts.onLost?.(e as Error)
           throw new PhoneLostError((e as Error).message)
         }
       })().finally(() => (this.reconnecting = null))
@@ -687,6 +822,22 @@ export function isConnectionLost(e: unknown): boolean {
   return /ended by the other party|stream was destroyed|stream ended|ECONNRESET|EPIPE|socket hang up|service not connected/i.test(
     (e as Error)?.message ?? '',
   )
+}
+
+/** Do not expose originals as cloud-only until their folder has actually been checked. */
+function knownPhoneLibrary(full: PhoneLibrary, dcim: Map<string, string[]>): PhoneLibrary {
+  const known = (a: PhoneAsset) => dcim.has(path.posix.dirname(a.path))
+  const byKey = new Map([...full.byKey].filter(([, a]) => known(a)))
+  const keys = (list: string[]) => list.filter(k => byKey.has(k))
+  return {
+    ...full,
+    byKey,
+    assets: full.assets.filter(a => byKey.has(a.key)),
+    hidden: keys(full.hidden),
+    deleted: keys(full.deleted),
+    bursts: new Map([...full.bursts].map(([id, list]) => [id, keys(list)])),
+    albums: full.albums.map(a => ({ ...a, keys: keys(a.keys) })),
+  }
 }
 
 function onDcim(dcim: Map<string, string[]>, devicePath: string): boolean {

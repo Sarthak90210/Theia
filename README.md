@@ -14,13 +14,20 @@ Download the installer or portable executable from
 **Theia-Portable** runs without installation. Both target Windows x64 and
 include FFmpeg, FFprobe, ExifTool and the image decoders; Node.js is not needed.
 
-For an iPhone connection, install Apple Devices or iTunes so the Apple Mobile
-Device Service and USB drivers are available. Unlock the phone and accept
-its Trust prompt. Opening local vaults does not require Apple software.
+For an iPhone connection, install [Apple Devices](https://apps.microsoft.com/detail/9np83lwlpz9k)
+or iTunes so the Apple Mobile Device Service and USB drivers are available.
+Theia Setup offers to open the Microsoft Store listing if the service isn't
+installed. If you're using Theia Portable, you can open it from **Devices →
+iPhone setup** when the service isn't running. Apple software is installed
+separately and isn't needed for Android phones or local vaults. After installing
+it, unlock your iPhone, reconnect it, and tap **Trust** if prompted.
 
 An Android phone needs nothing installed. Unlock it, tap the USB notification
 and choose **File transfer**. A phone set to charge only, or locked, shares no
-files; Theia says so and picks the phone up once it does.
+files; Theia says so and picks the phone up once it does. Both phones show
+photos in batches while the rest of the library is still loading. A large
+library can take a few minutes. Android uses the same gallery and sidebar as
+iPhone, with albums built from the media folders Android shares over USB.
 
 Release builds are unsigned. Windows may show an unknown-publisher prompt.
 Updating or uninstalling keeps the app profile and your photo vaults.

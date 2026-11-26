@@ -38,8 +38,8 @@ export const ANDROID_SCAN: ScanRequest = { roots: ANDROID_ROOTS, skip: ANDROID_S
  * Every media file in the phone's photo folders. One request when the device
  * can answer it whole (Android over MTP); otherwise a walk with list and stat.
  */
-export async function scanMedia(device: DeviceSource, request: ScanRequest = ANDROID_SCAN): Promise<ScanResult> {
-  if (device.scan) return device.scan(request)
+export async function scanMedia(device: DeviceSource, request: ScanRequest = ANDROID_SCAN, onProgress?: (checked: number) => void): Promise<ScanResult> {
+  if (device.scan) return device.scan(request, onProgress)
   const exts = new Set(request.extensions.map((e) => e.toLowerCase()))
   const skip = new Set(request.skip.map((s) => s.toLowerCase()))
   const files: ScannedFile[] = []

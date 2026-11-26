@@ -58,6 +58,9 @@ export interface DeviceInfo {
   state: 'opening' | 'ready' | 'problem'
   error: string | null
   count: number | null
+  scanChecked?: number
+  indexing?: boolean
+  indexError?: boolean
 }
 
 export interface VaultInfo {
@@ -227,7 +230,7 @@ export interface PhotosApi {
 
   collections(source: SourceId): Promise<Collections>
   /** A collection's items, or a search's results, best first, for `searchCollection(query)`. */
-  items(source: SourceId, collection: string): Promise<GalleryItem[]>
+  items(source: SourceId, collection: string, page?: { fromEnd: number; limit: number }): Promise<GalleryItem[]>
   detail(source: SourceId, key: string): Promise<ItemDetail | null>
   /**
    * Make a video playable, converting it first if the window can't play it as
@@ -286,6 +289,7 @@ export interface PhotosApi {
   /** Open a video the window cannot play in the system player. */
   openExternally(source: SourceId, key: string): Promise<void>
   retryDevice(id: SourceId): Promise<void>
+  openAppleDevices(): Promise<void>
   /** Open the place in the browser, on OpenStreetMap. */
   openMap(lat: number, lon: number): Promise<void>
 
@@ -405,6 +409,7 @@ export const INVOKE_CHANNELS = [
   'peopleSuggestions',
   'answerSuggestion',
   'retryDevice',
+  'openAppleDevices',
   'openMap',
 ] as const satisfies readonly Exclude<keyof PhotosApi, 'onState'>[]
 

@@ -40,6 +40,8 @@ export interface GridProps {
    * library) or at the top (search results, best match first).
    */
   startAt?: 'end' | 'top'
+  /** A phone page can prepend older items while the user is already browsing. */
+  preserveAnchor?: boolean
 }
 
 /** Room kept beside the tiles for the timeline. */
@@ -125,10 +127,10 @@ export function Grid(props: GridProps) {
   }, [layout, items])
 
   useEffect(() => {
-    anchor.current = null
+    if (!props.preserveAnchor) anchor.current = null
     focus.current = null
     setFocusIndex(null)
-  }, [items])
+  }, [items, props.preserveAnchor])
 
   const rows = visibleRows(layout.rows, viewport.top - OVERSCAN, viewport.top + viewport.height + OVERSCAN)
   const overview = view === 'years' || view === 'months'

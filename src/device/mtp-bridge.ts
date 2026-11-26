@@ -40,6 +40,7 @@ export class MtpError extends Error {
 interface Waiting {
   resolve: (r: { result: unknown; data: Buffer }) => void
   reject: (e: Error) => void
+  onProgress?: (checked: number) => void
 }
 
 const HELPER = 'mtp-helper.ps1'
@@ -68,7 +69,7 @@ export class MtpBridge {
   private readonly waiting = new Map<number, Waiting>()
   private buffer: Buffer = Buffer.alloc(0)
   /** A header whose data has not all arrived yet. */
-  private header: { id: number; ok: boolean; bytes: number; result?: unknown; error?: string; code?: string } | null = null
+  private header: { id: number; ok: boolean; bytes: number; result?: unknown; error?: string; code?: string; progress?: number } | null = null
   private ended: Error | null = null
   private stderr = ''
 
@@ -91,17 +92,17 @@ export class MtpBridge {
     return !this.ended
   }
 
-  request<T = unknown>(op: string, args: Record<string, unknown> = {}): Promise<{ result: T; data: Buffer }> {
+  request<T = unknown>(op: string, args: Record<string, unknown> = {}, onProgress?: (checked: number) => void): Promise<{ result: T; data: Buffer }> {
     if (this.ended) return Promise.reject(this.ended)
     const id = this.nextId++
     return new Promise((resolve, reject) => {
-      this.waiting.set(id, { resolve: resolve as Waiting['resolve'], reject })
+      this.waiting.set(id, { resolve: resolve as Waiting['resolve'], reject, onProgress })
       this.child.stdin.write(`${JSON.stringify({ ...args, id, op })}\n`)
     })
   }
 
-  async call<T = unknown>(op: string, args: Record<string, unknown> = {}): Promise<T> {
-    return (await this.request<T>(op, args)).result
+  async call<T = unknown>(op: string, args: Record<string, unknown> = {}, onProgress?: (checked: number) => void): Promise<T> {
+    return (await this.request<T>(op, args, onProgress)).result
   }
 
   /** Ask the helper to let go of the phone and stop; kill it if it doesn't. */
@@ -139,6 +140,10 @@ export class MtpBridge {
       this.header = null
       const w = this.waiting.get(h.id)
       if (!w) continue
+      if (typeof h.progress === 'number') {
+        w.onProgress?.(h.progress)
+        continue
+      }
       this.waiting.delete(h.id)
       if (h.ok) w.resolve({ result: h.result, data })
       else if (h.code === 'detached') w.reject(new DeviceDetachedError(h.error ?? 'The phone is no longer connected.'))
